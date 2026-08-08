@@ -1,0 +1,1985 @@
+<!DOCTYPE html>
+<html lang="hi">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>उपस्थिति रजिस्टर — Attendance Register</title>
+<link rel="manifest" href="manifest.json" />
+<meta name="theme-color" content="#1F3D2B" />
+<link rel="apple-touch-icon" href="icons/apple-touch-icon.png" />
+<link rel="icon" href="icons/icon-192.png" />
+<meta name="mobile-web-app-capable" content="yes" />
+<meta name="apple-mobile-web-app-capable" content="yes" />
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+<meta name="apple-mobile-web-app-title" content="Attendance" />
+<script crossorigin="anonymous" src="https://cdnjs.cloudflare.com/ajax/libs/react/18.3.1/umd/react.production.min.js"></script>
+<script crossorigin="anonymous" src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.3.1/umd/react-dom.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.24.7/babel.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.js"></script>
+<style>
+  html, body { margin: 0; padding: 0; }
+  #root:empty::before {
+    content: "Loading…";
+    display: block;
+    text-align: center;
+    padding: 40px;
+    font-family: sans-serif;
+    color: #6B4226;
+  }
+  #boot-error {
+    display: none;
+    max-width: 640px;
+    margin: 24px auto;
+    padding: 16px 18px;
+    background: #fdece7;
+    border: 1px solid #f0cfc5;
+    border-radius: 10px;
+    color: #7a2f20;
+    font-family: sans-serif;
+    font-size: 13px;
+    white-space: pre-wrap;
+  }
+</style>
+</head>
+<body>
+<div id="root"></div>
+<div id="boot-error"></div>
+
+<script>
+  // ---- surface any error on-screen instead of a silent blank page ----
+  window.addEventListener("error", function (e) {
+    var box = document.getElementById("boot-error");
+    if (box) {
+      box.style.display = "block";
+      box.textContent = "Page load error: " + (e.message || e.error) +
+        (e.filename ? "\n(" + e.filename + ":" + e.lineno + ")" : "") +
+        "\n\nAgar ye CDN se related error hai to internet connection check karo, ya browser console (F12) khol kar poora error dekho.";
+    }
+  });
+
+  // ---- storage polyfill (localStorage-backed, mirrors the window.storage API) ----
+  window.storage = {
+    get: async (key, shared) => {
+      try {
+        const v = localStorage.getItem(key);
+        if (v === null || v === undefined) return null;
+        return { key, value: v, shared: !!shared };
+      } catch (e) {
+        return null;
+      }
+    },
+    set: async (key, value, shared) => {
+      try {
+        localStorage.setItem(key, value);
+        return { key, value, shared: !!shared };
+      } catch (e) {
+        return null;
+      }
+    },
+    delete: async (key, shared) => {
+      try {
+        localStorage.removeItem(key);
+        return { key, deleted: true, shared: !!shared };
+      } catch (e) {
+        return null;
+      }
+    },
+    list: async (prefix, shared) => {
+      try {
+        const keys = Object.keys(localStorage).filter((k) => !prefix || k.startsWith(prefix));
+        return { keys, prefix, shared: !!shared };
+      } catch (e) {
+        return null;
+      }
+    },
+  };
+</script>
+
+<script type="text/babel">
+const { useState, useEffect, useRef, useMemo } = React;
+
+// Class delete ke liye Admin PIN (device-level). Admin isko header se badal sakta hai.
+const DELETE_PIN_KEY = "attendance-app-delete-pin";
+const DEFAULT_DELETE_PIN = "1234";
+
+/* ---------------- inline icon set (lucide-style outline icons) ---------------- */
+function makeIcon(paths) {
+  return function Icon({ size = 16, color = "currentColor", style, ...rest }) {
+    return (
+      <svg
+        xmlns="http://www.w3.org/2000/svg"
+        width={size}
+        height={size}
+        viewBox="0 0 24 24"
+        fill="none"
+        stroke={color}
+        strokeWidth="2"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+        style={style}
+        {...rest}
+      >
+        {paths}
+      </svg>
+    );
+  };
+}
+
+const Plus = makeIcon(<><path d="M5 12h14" /><path d="M12 5v14" /></>);
+const Trash2 = makeIcon(<>
+  <path d="M3 6h18" />
+  <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6" />
+  <path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
+  <line x1="10" x2="10" y1="11" y2="17" />
+  <line x1="14" x2="14" y1="11" y2="17" />
+</>);
+const BarChart3 = makeIcon(<>
+  <path d="M3 3v18h18" />
+  <path d="M18 17V9" />
+  <path d="M13 17V5" />
+  <path d="M8 17v-3" />
+</>);
+const BookOpen = makeIcon(<>
+  <path d="M12 7v14" />
+  <path d="M3 18a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1h5a4 4 0 0 1 4 4 4 4 0 0 1 4-4h5a1 1 0 0 1 1 1v13a1 1 0 0 1-1 1h-6a3 3 0 0 0-3 3 3 3 0 0 0-3-3z" />
+</>);
+const ChevronLeft = makeIcon(<path d="m15 18-6-6 6-6" />);
+const ChevronRight = makeIcon(<path d="m9 18 6-6-6-6" />);
+const UserPlus = makeIcon(<>
+  <path d="M2 21a8 8 0 0 1 13.292-6" />
+  <circle cx="10" cy="8" r="5" />
+  <path d="M19 16v6" />
+  <path d="M22 19h-6" />
+</>);
+const Pencil = makeIcon(<>
+  <path d="M21.174 6.812a1 1 0 0 0-3.986-3.987L3.842 16.174a2 2 0 0 0-.5.83l-1.321 4.352a.5.5 0 0 0 .623.622l4.353-1.32a2 2 0 0 0 .83-.497z" />
+  <path d="m15 5 4 4" />
+</>);
+const Check = makeIcon(<path d="M20 6 9 17l-5-5" />);
+const Printer = makeIcon(<>
+  <path d="M6 18H4a2 2 0 0 1-2-2v-5a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2v5a2 2 0 0 1-2 2h-2" />
+  <path d="M6 9V3a1 1 0 0 1 1-1h10a1 1 0 0 1 1 1v6" />
+  <rect x="6" y="14" width="12" height="8" rx="1" />
+</>);
+const User = makeIcon(<>
+  <path d="M19 21v-2a4 4 0 0 0-4-4H9a4 4 0 0 0-4 4v2" />
+  <circle cx="12" cy="7" r="4" />
+</>);
+const X = makeIcon(<><path d="M18 6 6 18" /><path d="m6 6 12 12" /></>);
+const Layers = makeIcon(<>
+  <path d="M12.83 2.18a2 2 0 0 0-1.66 0L2.6 6.08a1 1 0 0 0 0 1.83l8.58 3.91a2 2 0 0 0 1.66 0l8.58-3.9a1 1 0 0 0 0-1.83z" />
+  <path d="M2 12a1 1 0 0 0 .58.91l8.6 3.91a2 2 0 0 0 1.65 0l8.58-3.9A1 1 0 0 0 22 12" />
+  <path d="M2 17a1 1 0 0 0 .58.91l8.6 3.91a2 2 0 0 0 1.65 0l8.58-3.9A1 1 0 0 0 22 17" />
+</>);
+const Power = makeIcon(<>
+  <path d="M12 2v10" />
+  <path d="M18.4 6.6a9 9 0 1 1-12.77.04" />
+</>);
+
+/* ---------------- app logic (ported from the original .jsx) ---------------- */
+
+const FONT_IMPORT = `@import url('https://fonts.googleapis.com/css2?family=Kalam:wght@400;700&family=Inter:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap');`;
+
+const STORAGE_KEY = "attendance-app-store-v2";
+
+const MONTH_NAMES = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+
+const todayISO = () => {
+  const d = new Date();
+  const off = d.getTimezoneOffset();
+  return new Date(d.getTime() - off * 60000).toISOString().slice(0, 10);
+};
+
+const currentMonthStr = () => todayISO().slice(0, 7);
+const currentYearStr = () => todayISO().slice(0, 4);
+const newId = (p) => `${p}_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
+
+const STATUS = {
+  P: { label: "Present", short: "P", color: "#4C8C5B" },
+  A: { label: "Absent", short: "A", color: "#C1503D" },
+  L: { label: "Leave", short: "L", color: "#4A6FA5" },
+};
+
+const blankClass = (name = "") => ({ id: newId("c"), className: name, teacher: "", students: [], attendance: {} });
+const normalizeClasses = (list) =>
+  (list || []).map((c) => ({
+    ...c,
+    students: (c.students || []).map((s) => ({ ...s, active: s.active === false ? false : true })),
+  }));
+
+function AttendanceApp({ userEmail, onLogout, isGuest, isAdmin, client, signupClient, teacherOptions = [], viewAsUserId, onChangeViewAs, viewingTeacherEmail }) {
+  const [loaded, setLoaded] = useState(false);
+  const [classes, setClasses] = useState([]);
+  const [activeClassId, setActiveClassId] = useState(null);
+  const [showNewClassForm, setShowNewClassForm] = useState(false);
+  const [newClassName, setNewClassName] = useState("");
+
+  const [showTeacherPanel, setShowTeacherPanel] = useState(false);
+  const [teacherAccounts, setTeacherAccounts] = useState([]);
+  const [teacherForm, setTeacherForm] = useState({ email: "", password: "" });
+  const [teacherPanelError, setTeacherPanelError] = useState("");
+  const [teacherSaving, setTeacherSaving] = useState(false);
+  const [teacherLastCreated, setTeacherLastCreated] = useState(null);
+
+  const [selectedDate, setSelectedDate] = useState(todayISO());
+  const [selectedMonth, setSelectedMonth] = useState(currentMonthStr());
+  const [selectedYear, setSelectedYear] = useState(currentYearStr());
+  const [selectedStudentId, setSelectedStudentId] = useState("");
+
+  const [view, setView] = useState("enrollment");
+  const [reportScope, setReportScope] = useState("month");
+
+  const [newRoll, setNewRoll] = useState("");
+  const [newName, setNewName] = useState("");
+  const [bulkText, setBulkText] = useState("");
+  const [editingId, setEditingId] = useState(null);
+  const [editRoll, setEditRoll] = useState("");
+  const [editName, setEditName] = useState("");
+  const [saveError, setSaveError] = useState(false);
+  const [justStamped, setJustStamped] = useState(null);
+  const nameInputRef = useRef(null);
+
+  // ---- load + migrate ----
+  useEffect(() => {
+    (async () => {
+      try {
+        const res = await window.storage.get(STORAGE_KEY, false);
+        if (res && res.value) {
+          const data = JSON.parse(res.value);
+          if (data.classes && data.classes.length) {
+            setClasses(normalizeClasses(data.classes));
+            setActiveClassId(data.activeClassId || data.classes[0].id);
+          } else {
+            const c = blankClass();
+            setClasses([c]);
+            setActiveClassId(c.id);
+          }
+        } else {
+          let migrated = null;
+          try {
+            const old = await window.storage.get("attendance-app-store-v1", false);
+            if (old && old.value) {
+              const od = JSON.parse(old.value);
+              if (od.students || od.attendance) {
+                migrated = blankClass(od.classInfo?.className || "");
+                migrated.teacher = od.classInfo?.teacher || "";
+                migrated.students = od.students || [];
+                migrated.attendance = od.attendance || {};
+              }
+            }
+          } catch (e) {}
+          const c = migrated || blankClass();
+          setClasses([c]);
+          setActiveClassId(c.id);
+        }
+      } catch (e) {
+        const c = blankClass();
+        setClasses([c]);
+        setActiveClassId(c.id);
+      } finally {
+        setLoaded(true);
+      }
+    })();
+  }, []);
+
+  useEffect(() => {
+    if (!loaded) return;
+    (async () => {
+      try {
+        const payload = JSON.stringify({ classes, activeClassId });
+        const result = await window.storage.set(STORAGE_KEY, payload, false);
+        setSaveError(!result);
+      } catch (e) {
+        setSaveError(true);
+      }
+    })();
+  }, [classes, activeClassId, loaded]);
+
+  const activeClass = classes.find((c) => c.id === activeClassId) || null;
+  const students = activeClass ? activeClass.students : [];
+  const activeStudents = students.filter((s) => s.active !== false);
+  const attendance = activeClass ? activeClass.attendance : {};
+  const classInfo = { className: activeClass ? activeClass.className : "", teacher: activeClass ? activeClass.teacher : "" };
+
+  const updateActive = (patchFn) => {
+    setClasses((prev) => prev.map((c) => (c.id === activeClassId ? { ...c, ...patchFn(c) } : c)));
+  };
+  const setStudents = (updater) =>
+    updateActive((c) => ({ students: typeof updater === "function" ? updater(c.students) : updater }));
+  const setAttendance = (updater) =>
+    updateActive((c) => ({ attendance: typeof updater === "function" ? updater(c.attendance) : updater }));
+  const setClassInfo = (updater) =>
+    updateActive((c) => {
+      const cur = { className: c.className, teacher: c.teacher };
+      const next = typeof updater === "function" ? updater(cur) : updater;
+      return { className: next.className, teacher: next.teacher };
+    });
+
+  useEffect(() => {
+    if (!selectedStudentId && students.length) setSelectedStudentId(students[0].id);
+    if (selectedStudentId && !students.find((s) => s.id === selectedStudentId)) {
+      setSelectedStudentId(students.length ? students[0].id : "");
+    }
+  }, [students, activeClassId]); // eslint-disable-line
+
+  const addClass = () => {
+    const name = newClassName.trim();
+    const c = blankClass(name || `Class ${classes.length + 1}`);
+    setClasses((prev) => [...prev, c]);
+    setActiveClassId(c.id);
+    setNewClassName("");
+    setShowNewClassForm(false);
+    setView("enrollment");
+  };
+
+  const deleteClass = () => {
+    if (!activeClass || !isAdmin) return;
+    const storedPin = localStorage.getItem(DELETE_PIN_KEY) || DEFAULT_DELETE_PIN;
+    const entered = window.prompt("Class delete karne ke liye Admin PIN daalo:");
+    if (entered === null) return; // cancelled
+    if (entered.trim() !== storedPin) {
+      window.alert("Galat PIN. Class delete nahi hui.");
+      return;
+    }
+    const ok = window.confirm(`"${activeClass.className || "Untitled Class"}" delete karein? Iska poora data (students + attendance) mit jaayega.`);
+    if (!ok) return;
+    setClasses((prev) => {
+      const remaining = prev.filter((c) => c.id !== activeClassId);
+      const list = remaining.length ? remaining : [blankClass()];
+      setActiveClassId(list[0].id);
+      return list;
+    });
+  };
+
+  const changeDeletePin = () => {
+    const storedPin = localStorage.getItem(DELETE_PIN_KEY) || DEFAULT_DELETE_PIN;
+    const current = window.prompt("Abhi ka Admin PIN daalo (default: " + DEFAULT_DELETE_PIN + "):");
+    if (current === null) return;
+    if (current.trim() !== storedPin) {
+      window.alert("Galat PIN.");
+      return;
+    }
+    const next = window.prompt("Naya PIN daalo (4-6 digit):");
+    if (!next || !next.trim()) return;
+    const confirmNext = window.prompt("Naya PIN dobara daalo (confirm):");
+    if (next.trim() !== (confirmNext || "").trim()) {
+      window.alert("Dono PIN match nahi hue. Kuch nahi badla.");
+      return;
+    }
+    localStorage.setItem(DELETE_PIN_KEY, next.trim());
+    window.alert("PIN update ho gaya.");
+  };
+
+  /* ---------- Class Teacher logins (admin-only) ----------
+     Owner/admin creates a real Supabase Auth login (email + password) for
+     each class teacher, exactly like the fee register app. Each teacher's
+     data (classes/sections/students/attendance) stays fully isolated —
+     Postgres RLS on app_storage already only ever returns rows belonging
+     to whoever is logged in — so a teacher only ever sees the class(es)
+     they themselves created. */
+  const loadTeacherAccounts = async () => {
+    if (!client) return;
+    const { data, error } = await client
+      .from("profiles").select("*").eq("role", "teacher").order("created_at", { ascending: false });
+    if (!error && data) setTeacherAccounts(data);
+  };
+
+  const createTeacherAccount = async () => {
+    const email = teacherForm.email.trim();
+    const pwd = teacherForm.password.trim();
+    setTeacherPanelError("");
+    if (!email || !pwd) {
+      setTeacherPanelError("Email aur password dono bharo.");
+      return;
+    }
+    if (pwd.length < 6) {
+      setTeacherPanelError("Password kam se kam 6 characters ka rakhein.");
+      return;
+    }
+    setTeacherSaving(true);
+    const { data: signUpData, error: signUpError } = await signupClient.auth.signUp({ email, password: pwd });
+    if (signUpError || !signUpData.user) {
+      setTeacherPanelError(signUpError ? signUpError.message : "Account nahi ban paaya.");
+      setTeacherSaving(false);
+      return;
+    }
+    const { error: profileError } = await client.from("profiles").insert({
+      id: signUpData.user.id, email, role: "teacher",
+    });
+    if (profileError) {
+      setTeacherPanelError("Account ban gaya lekin profile save nahi hui — Supabase me 'profiles' table check karein.");
+    } else {
+      setTeacherLastCreated({ email, password: pwd });
+      setTeacherForm({ email: "", password: "" });
+      await loadTeacherAccounts();
+    }
+    setTeacherSaving(false);
+  };
+
+  const deleteTeacherAccount = async (id) => {
+    const ok = window.confirm("Is class teacher ka access hataayein? (Login abhi bhi Supabase me rahega, lekin ab kuch access nahi milega.)");
+    if (!ok) return;
+    setTeacherSaving(true);
+    const { error } = await client.from("profiles").delete().eq("id", id);
+    if (!error) await loadTeacherAccounts();
+    setTeacherSaving(false);
+  };
+
+  useEffect(() => {
+    if (isAdmin && showTeacherPanel) loadTeacherAccounts();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isAdmin, showTeacherPanel]);
+
+  const nextAutoRoll = (list) => {
+    const nums = list.map((s) => parseInt(s.roll, 10)).filter((n) => !isNaN(n));
+    return nums.length ? String(Math.max(...nums) + 1) : "1";
+  };
+
+  const addStudent = () => {
+    const name = newName.trim();
+    if (!name) return;
+    setStudents((prev) => {
+      const roll = newRoll.trim() || nextAutoRoll(prev);
+      return [...prev, { id: newId("s"), roll, name, active: true, enrolledAt: todayISO() }].sort((a, b) => a.roll.localeCompare(b.roll, undefined, { numeric: true }));
+    });
+    setNewRoll("");
+    setNewName("");
+    nameInputRef.current && nameInputRef.current.focus();
+  };
+
+  const addBulk = () => {
+    const lines = bulkText.split("\n").map((l) => l.trim()).filter(Boolean);
+    if (!lines.length) return;
+    const today = todayISO();
+    setStudents((prev) => {
+      let list = [...prev];
+      let counter = parseInt(nextAutoRoll(list), 10);
+      lines.forEach((line) => {
+        let roll, name;
+        const m = line.match(/^(\d+)[.)\-\s]+(.*)$/);
+        if (m) {
+          roll = m[1];
+          name = m[2].trim();
+        } else {
+          roll = String(counter);
+          name = line;
+        }
+        counter = Math.max(counter, parseInt(roll, 10) || 0) + 1;
+        list.push({ id: newId("s"), roll, name, active: true, enrolledAt: today });
+      });
+      return list.sort((a, b) => a.roll.localeCompare(b.roll, undefined, { numeric: true }));
+    });
+    setBulkText("");
+  };
+
+  const removeStudent = (id, name) => {
+    if (!isAdmin) return;
+    const storedPin = localStorage.getItem(DELETE_PIN_KEY) || DEFAULT_DELETE_PIN;
+    const entered = window.prompt(`"${name || "Student"}" ko delete karne ke liye Admin PIN daalo:`);
+    if (entered === null) return; // cancelled
+    if (entered.trim() !== storedPin) {
+      window.alert("Galat PIN. Student delete nahi hua.");
+      return;
+    }
+    setStudents((prev) => prev.filter((s) => s.id !== id));
+    setAttendance((prev) => {
+      const copy = { ...prev };
+      Object.keys(copy).forEach((date) => {
+        if (copy[date] && copy[date][id] !== undefined) {
+          const dayCopy = { ...copy[date] };
+          delete dayCopy[id];
+          copy[date] = dayCopy;
+        }
+      });
+      return copy;
+    });
+  };
+
+  const toggleActive = (id) => {
+    setStudents((prev) => prev.map((s) => (s.id === id ? { ...s, active: s.active === false ? true : false } : s)));
+  };
+
+  const startEdit = (s) => {
+    setEditingId(s.id);
+    setEditRoll(s.roll);
+    setEditName(s.name);
+  };
+
+  const saveEdit = (id) => {
+    setStudents((prev) =>
+      prev
+        .map((s) => (s.id === id ? { ...s, roll: editRoll.trim() || s.roll, name: editName.trim() || s.name } : s))
+        .sort((a, b) => a.roll.localeCompare(b.roll, undefined, { numeric: true }))
+    );
+    setEditingId(null);
+  };
+
+  const markStatus = (studentId, status) => {
+    setAttendance((prev) => {
+      const day = { ...(prev[selectedDate] || {}) };
+      day[studentId] = day[studentId] === status ? undefined : status;
+      if (day[studentId] === undefined) delete day[studentId];
+      return { ...prev, [selectedDate]: day };
+    });
+    setJustStamped(studentId + status);
+    setTimeout(() => setJustStamped(null), 380);
+  };
+
+  const markAllStatus = (status) => {
+    if (!activeStudents.length) return;
+    setAttendance((prev) => {
+      const day = { ...(prev[selectedDate] || {}) };
+      activeStudents.forEach((s) => {
+        day[s.id] = status;
+      });
+      return { ...prev, [selectedDate]: day };
+    });
+  };
+
+  const toggleAllPresent = () => {
+    if (!activeStudents.length) return;
+    const day = attendance[selectedDate] || {};
+    const allPresent = activeStudents.every((s) => day[s.id] === "P");
+    setAttendance((prev) => {
+      const nextDay = { ...(prev[selectedDate] || {}) };
+      activeStudents.forEach((s) => {
+        if (allPresent) {
+          delete nextDay[s.id];
+        } else {
+          nextDay[s.id] = "P";
+        }
+      });
+      return { ...prev, [selectedDate]: nextDay };
+    });
+  };
+
+
+  const dayRecord = attendance[selectedDate] || {};
+  const presentCount = activeStudents.filter((s) => dayRecord[s.id] === "P").length;
+  const absentCount = activeStudents.filter((s) => dayRecord[s.id] === "A").length;
+  const leaveCount = activeStudents.filter((s) => dayRecord[s.id] === "L").length;
+  const markedCount = presentCount + absentCount + leaveCount;
+  const pct = activeStudents.length ? Math.round((presentCount / activeStudents.length) * 100) : 0;
+
+  const shiftDate = (deltaDays) => {
+    const d = new Date(selectedDate + "T00:00:00");
+    d.setDate(d.getDate() + deltaDays);
+    setSelectedDate(d.toISOString().slice(0, 10));
+  };
+  const shiftMonth = (delta) => {
+    const [y, m] = selectedMonth.split("-").map(Number);
+    const d = new Date(y, m - 1 + delta, 1);
+    setSelectedMonth(`${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`);
+  };
+  const shiftYear = (delta) => setSelectedYear(String(parseInt(selectedYear, 10) + delta));
+
+  const formatDateLabel = (iso) => {
+    const d = new Date(iso + "T00:00:00");
+    return d.toLocaleDateString("en-IN", { weekday: "short", day: "numeric", month: "short", year: "numeric" });
+  };
+  const monthLabel = useMemo(() => {
+    const [y, m] = selectedMonth.split("-").map(Number);
+    return new Date(y, m - 1, 1).toLocaleDateString("en-IN", { month: "long", year: "numeric" });
+  }, [selectedMonth]);
+
+  const statsForDates = (studentId, dates) => {
+    let present = 0, absent = 0, leave = 0;
+    dates.forEach((d) => {
+      const st = attendance[d] && attendance[d][studentId];
+      if (st === "P") present++;
+      else if (st === "A") absent++;
+      else if (st === "L") leave++;
+    });
+    const total = present + absent + leave;
+    const percent = total ? Math.round((present / total) * 100) : null;
+    return { present, absent, leave, total, percent };
+  };
+  const datesWithData = (prefix) =>
+    Object.keys(attendance).filter((d) => d.startsWith(prefix) && Object.keys(attendance[d] || {}).length > 0);
+
+  const barColor = (p) => (p === null ? "#B8AF98" : p >= 75 ? "#4C8C5B" : p >= 50 ? "#D9A441" : "#C1503D");
+  const printReport = () => window.print();
+
+  const monthDates = datesWithData(selectedMonth);
+  const monthlyStats = students.map((s) => ({ ...s, ...statsForDates(s.id, monthDates) }));
+  const monthClassAvg = (() => {
+    const w = monthlyStats.filter((s) => s.percent !== null);
+    return w.length ? Math.round(w.reduce((a, s) => a + s.percent, 0) / w.length) : null;
+  })();
+
+  const yearDates = datesWithData(selectedYear);
+  const yearlyStats = students.map((s) => ({ ...s, ...statsForDates(s.id, yearDates) }));
+  const yearClassAvg = (() => {
+    const w = yearlyStats.filter((s) => s.percent !== null);
+    return w.length ? Math.round(w.reduce((a, s) => a + s.percent, 0) / w.length) : null;
+  })();
+
+  const selectedStudent = students.find((s) => s.id === selectedStudentId);
+  const studentMonthRows = useMemo(() => {
+    if (!selectedStudentId) return [];
+    return MONTH_NAMES.map((name, idx) => {
+      const prefix = `${selectedYear}-${String(idx + 1).padStart(2, "0")}`;
+      const dates = datesWithData(prefix);
+      return { month: name, ...statsForDates(selectedStudentId, dates) };
+    });
+  }, [selectedStudentId, selectedYear, attendance]); // eslint-disable-line
+
+  const studentYearTotal = useMemo(() => {
+    if (!selectedStudentId) return { present: 0, absent: 0, leave: 0, total: 0, percent: null };
+    return statsForDates(selectedStudentId, yearDates);
+  }, [selectedStudentId, yearDates]); // eslint-disable-line
+
+  const WEEKDAY_SHORT = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+  const daysInSelectedMonth = useMemo(() => {
+    const [y, m] = selectedMonth.split("-").map(Number);
+    return new Date(y, m, 0).getDate();
+  }, [selectedMonth]);
+
+  const gridRows = useMemo(() => {
+    return students.map((s) => {
+      const days = [];
+      let totalPresent = 0;
+      for (let d = 1; d <= daysInSelectedMonth; d++) {
+        const dateStr = `${selectedMonth}-${String(d).padStart(2, "0")}`;
+        const st = attendance[dateStr] && attendance[dateStr][s.id];
+        if (st === "P") totalPresent++;
+        days.push(st || null);
+      }
+      return { ...s, days, totalPresent };
+    });
+  }, [students, selectedMonth, daysInSelectedMonth, attendance]);
+
+  const studentDayList = useMemo(() => {
+    if (!selectedStudentId) return [];
+    const [y, m] = selectedMonth.split("-").map(Number);
+    const rows = [];
+    for (let d = 1; d <= daysInSelectedMonth; d++) {
+      const dateStr = `${selectedMonth}-${String(d).padStart(2, "0")}`;
+      const dObj = new Date(y, m - 1, d);
+      const st = attendance[dateStr] && attendance[dateStr][selectedStudentId];
+      rows.push({ date: dateStr, day: d, weekday: WEEKDAY_SHORT[dObj.getDay()], status: st || null });
+    }
+    return rows;
+  }, [selectedStudentId, selectedMonth, daysInSelectedMonth, attendance]); // eslint-disable-line
+
+  const studentAbsentDates = useMemo(() => {
+    if (!selectedStudentId) return [];
+    return yearDates
+      .filter((d) => attendance[d][selectedStudentId] === "A")
+      .sort()
+      .map((d) => new Date(d + "T00:00:00").toLocaleDateString("en-IN", { day: "numeric", month: "short" }));
+  }, [selectedStudentId, yearDates, attendance]);
+
+  return (
+    <div style={styles.outer}>
+      <style>{FONT_IMPORT}{`
+        * { box-sizing: border-box; }
+        .stamp-pop { animation: stampIn 0.38s cubic-bezier(.34,1.56,.64,1); }
+        @keyframes stampIn {
+          0% { transform: scale(1.6) rotate(-10deg); opacity: 0; }
+          60% { transform: scale(0.92) rotate(-4deg); opacity: 1; }
+          100% { transform: scale(1) rotate(-6deg); opacity: 1; }
+        }
+        input::placeholder, textarea::placeholder { color: #8a8368; }
+        .chalk-btn:active { transform: translateY(1px); }
+        @media (prefers-reduced-motion: reduce) { .stamp-pop { animation: none; } }
+        @media print {
+          @page { margin: 10mm; size: landscape; }
+          .no-print { display: none !important; }
+          body { background: #fff !important; }
+          .print-only { display: block !important; }
+          .print-frame { background: #fff !important; box-shadow: none !important; padding: 0 !important; }
+          .print-paper { background: #fff !important; background-image: none !important; padding: 0 !important; }
+          .print-table th, .print-table td { border-color: #999 !important; }
+          .print-table { overflow: visible !important; max-width: none !important; }
+          .grid-name-col { position: static !important; }
+          .grid-print-table { width: 100% !important; table-layout: fixed !important; }
+          .grid-print-table th, .grid-print-table td { font-size: 7.5px !important; padding: 2px 1px !important; min-width: 0 !important; }
+          .grid-print-table th:nth-child(1), .grid-print-table td:nth-child(1) { width: 22px !important; }
+          .grid-print-table th:nth-child(2), .grid-print-table td:nth-child(2) {
+            width: 60px !important;
+            max-width: 60px !important;
+            overflow: hidden !important;
+            text-overflow: ellipsis !important;
+            white-space: nowrap !important;
+          }
+        }
+        .print-only { display: none; }
+      `}</style>
+
+      {onLogout && (
+        <div style={styles.accountBar} className="no-print">
+          <span style={styles.accountEmail}>
+            {userEmail}
+            {isGuest && <span style={styles.guestTag}>CLASS TEACHER</span>}
+          </span>
+          <div style={{ display: "flex", gap: 6, flexShrink: 0 }}>
+            {isAdmin && (
+              <button style={styles.teacherPanelBtn} onClick={() => setShowTeacherPanel((v) => !v)}>
+                Class Teacher Logins
+              </button>
+            )}
+            <button style={styles.logoutBtn} onClick={onLogout}>Logout</button>
+          </div>
+        </div>
+      )}
+
+      {isAdmin && (
+        <div style={styles.viewAsRow} className="no-print">
+          <span style={styles.viewAsLabel}>Data dekh/edit karein:</span>
+          <select
+            style={styles.viewAsSelect}
+            value={viewAsUserId || ""}
+            onChange={(e) => onChangeViewAs(e.target.value)}
+          >
+            <option value="">Apna data (Admin)</option>
+            {teacherOptions.map((t) => (
+              <option key={t.id} value={t.id}>{t.email}</option>
+            ))}
+          </select>
+          <button style={styles.linkBtnDark} onClick={changeDeletePin}>Delete PIN badlein</button>
+        </div>
+      )}
+
+      {isAdmin && viewingTeacherEmail && (
+        <div style={styles.viewingBanner} className="no-print">
+          Admin Mode — <b>{viewingTeacherEmail}</b> ki class dekh/edit kar rahe ho.
+        </div>
+      )}
+
+      {isAdmin && showTeacherPanel && (
+        <div style={styles.teacherPanelWrap} className="no-print">
+          <div style={styles.teacherPanelTitle}>Class Teacher Logins</div>
+          <div style={authStyles.stepText}>
+            Yahan se har class teacher ke liye ek login (email + password) banao. Wo isi se login karke apni khud ki class(es)/sections bana sakta hai, aur sirf apni banayi class ka hi data dekh/edit kar sakta hai.
+          </div>
+
+          {teacherLastCreated && (
+            <div style={styles.teacherCreatedBox}>
+              <div>Email: <b>{teacherLastCreated.email}</b></div>
+              <div>Password: <b>{teacherLastCreated.password}</b></div>
+              <button style={styles.linkBtnDark} onClick={() => setTeacherLastCreated(null)}>Done, hide this</button>
+            </div>
+          )}
+
+          <div style={styles.teacherFormRow}>
+            <input style={styles.chalkInput} type="email" placeholder="teacher@example.com" value={teacherForm.email}
+              onChange={(e) => setTeacherForm((p) => ({ ...p, email: e.target.value }))} />
+            <input style={styles.chalkInput} placeholder="At least 6 characters" value={teacherForm.password}
+              onChange={(e) => setTeacherForm((p) => ({ ...p, password: e.target.value }))} />
+          </div>
+          {teacherPanelError && <div style={authStyles.error}>{teacherPanelError}</div>}
+          <button style={styles.teacherPanelBtn} onClick={createTeacherAccount} disabled={teacherSaving}>
+            {teacherSaving ? "Please wait…" : "Create Login"}
+          </button>
+
+          <div style={{ marginTop: 12 }}>
+            {teacherAccounts.length === 0 ? (
+              <div style={authStyles.stepText}>Abhi tak koi class teacher login nahi bana.</div>
+            ) : (
+              teacherAccounts.map((t) => (
+                <div key={t.id} style={styles.teacherRow}>
+                  <span>{t.email}</span>
+                  <button style={styles.teacherRemoveBtn} onClick={() => deleteTeacherAccount(t.id)} disabled={teacherSaving}>
+                    Remove Access
+                  </button>
+                </div>
+              ))
+            )}
+          </div>
+        </div>
+      )}
+
+      <div style={styles.frame} className={view === "reports" ? "print-frame" : ""}>
+        <div style={styles.board} className="no-print">
+          <div style={styles.boardTexture} />
+          <div style={{ position: "relative", zIndex: 1 }}>
+            <div style={styles.chalkTitle}>उपस्थिति रजिस्टर</div>
+            <div style={styles.chalkSub}>Student Attendance Register</div>
+
+            <div style={styles.classSwitchRow}>
+              <Layers size={15} color="#E8C468" style={{ flexShrink: 0 }} />
+              <select
+                style={styles.classSelect}
+                value={activeClassId || ""}
+                onChange={(e) => setActiveClassId(e.target.value)}
+              >
+                {classes.map((c) => (
+                  <option key={c.id} value={c.id} style={{ color: "#000" }}>
+                    {c.className || "Untitled Class"} ({c.students.length})
+                  </option>
+                ))}
+              </select>
+              <button style={styles.classIconBtn} onClick={() => setShowNewClassForm((v) => !v)} aria-label="Add class">
+                <Plus size={16} />
+              </button>
+              {isAdmin && (
+                <button style={styles.classIconBtn} onClick={deleteClass} aria-label="Delete class">
+                  <Trash2 size={15} />
+                </button>
+              )}
+            </div>
+
+            {showNewClassForm && (
+              <div style={styles.newClassRow}>
+                <input
+                  style={styles.chalkInput}
+                  placeholder="Nayi class ka naam (e.g. Class 6-A)"
+                  value={newClassName}
+                  onChange={(e) => setNewClassName(e.target.value)}
+                  onKeyDown={(e) => e.key === "Enter" && addClass()}
+                  autoFocus
+                />
+                <button style={styles.classIconBtn} onClick={addClass} aria-label="Confirm add class"><Check size={16} /></button>
+                <button style={styles.classIconBtn} onClick={() => { setShowNewClassForm(false); setNewClassName(""); }} aria-label="Cancel"><X size={15} /></button>
+              </div>
+            )}
+
+            <div style={styles.classRow}>
+              <input style={styles.chalkInput} placeholder="Class / Section" value={classInfo.className}
+                onChange={(e) => setClassInfo((p) => ({ ...p, className: e.target.value }))} />
+              <input style={styles.chalkInput} placeholder="Teacher name" value={classInfo.teacher}
+                onChange={(e) => setClassInfo((p) => ({ ...p, teacher: e.target.value }))} />
+            </div>
+          </div>
+        </div>
+
+        <div style={styles.tabRow} className="no-print">
+          <button onClick={() => setView("enrollment")} style={{ ...styles.tabBtn, ...(view === "enrollment" ? styles.tabBtnActive : {}) }}>
+            <UserPlus size={15} style={{ marginRight: 6, verticalAlign: -3 }} />Enrollment
+          </button>
+          <button onClick={() => setView("register")} style={{ ...styles.tabBtn, ...(view === "register" ? styles.tabBtnActive : {}) }}>
+            <BookOpen size={15} style={{ marginRight: 6, verticalAlign: -3 }} />Register
+          </button>
+          <button onClick={() => setView("reports")} style={{ ...styles.tabBtn, ...(view === "reports" ? styles.tabBtnActive : {}) }}>
+            <BarChart3 size={15} style={{ marginRight: 6, verticalAlign: -3 }} />Reports
+          </button>
+        </div>
+
+        <div style={styles.paper} className={view === "reports" ? "print-paper" : ""}>
+          {view === "enrollment" && (
+            <>
+              <div style={styles.sectionLabel}>Ek student add karo</div>
+              <div style={styles.addRow}>
+                <input style={{ ...styles.textInput, width: 64, flexShrink: 0 }} placeholder="Roll" value={newRoll} onChange={(e) => setNewRoll(e.target.value)} />
+                <input ref={nameInputRef} style={{ ...styles.textInput, flex: 1 }} placeholder="Student name" value={newName}
+                  onChange={(e) => setNewName(e.target.value)} onKeyDown={(e) => e.key === "Enter" && addStudent()} />
+                <button style={styles.addBtn} onClick={addStudent} aria-label="Add student"><Plus size={18} /></button>
+              </div>
+
+              <div style={styles.sectionLabel}>Ya ek saath poori list paste karo (ek line me ek naam)</div>
+              <textarea style={styles.bulkArea} placeholder={"Rohit Sharma\nPriya Verma\n03. Aman Khan"} value={bulkText}
+                onChange={(e) => setBulkText(e.target.value)} rows={4} />
+              <button style={styles.bulkBtn} onClick={addBulk} disabled={!bulkText.trim()}>Sabko enroll karo</button>
+
+              <div style={{ ...styles.sectionLabel, marginTop: 18 }}>
+                {classInfo.className || "Is class"} me enrolled students ({students.filter((s) => s.active !== false).length} active / {students.length} total)
+              </div>
+              {students.length === 0 ? (
+                <div style={styles.empty}>Abhi koi student enroll nahi hua.</div>
+              ) : (
+                <div style={styles.ledger}>
+                  {students.map((s, idx) => {
+                    const isActive = s.active !== false;
+                    return (
+                    <div key={s.id} style={{ ...styles.ledgerRow, borderBottom: idx === students.length - 1 ? "none" : "1px dashed #d8cfae", opacity: isActive ? 1 : 0.55 }}>
+                      {editingId === s.id ? (
+                        <>
+                          <input style={{ ...styles.textInput, width: 50, padding: "5px 6px" }} value={editRoll} onChange={(e) => setEditRoll(e.target.value)} />
+                          <input style={{ ...styles.textInput, flex: 1, padding: "5px 6px" }} value={editName} onChange={(e) => setEditName(e.target.value)} onKeyDown={(e) => e.key === "Enter" && saveEdit(s.id)} />
+                          <button style={styles.deleteBtn} onClick={() => saveEdit(s.id)} aria-label="Save"><Check size={16} color="#4C8C5B" /></button>
+                        </>
+                      ) : (
+                        <>
+                          <div style={styles.rollBadge}>{s.roll}</div>
+                          <div style={styles.studentName}>
+                            <div style={styles.studentNameLine}>
+                              {s.name}
+                              {!isActive && <span style={styles.inactiveTag}>Inactive</span>}
+                            </div>
+                            {s.enrolledAt && (
+                              <div style={styles.enrolledDate}>
+                                Enrolled: {new Date(s.enrolledAt + "T00:00:00").toLocaleDateString("en-IN", { day: "numeric", month: "short", year: "numeric" })}
+                              </div>
+                            )}
+                          </div>
+                          <button
+                            style={{ ...styles.deleteBtn, color: isActive ? "#4C8C5B" : "#b3a889" }}
+                            onClick={() => toggleActive(s.id)}
+                            aria-label={isActive ? `Mark ${s.name} inactive` : `Mark ${s.name} active`}
+                            title={isActive ? "Active — tap to mark inactive" : "Inactive — tap to mark active"}
+                          >
+                            <Power size={14} />
+                          </button>
+                          <button style={styles.deleteBtn} onClick={() => startEdit(s)} aria-label={`Edit ${s.name}`}><Pencil size={14} /></button>
+                          {isAdmin && (
+                            <button style={styles.deleteBtn} onClick={() => removeStudent(s.id, s.name)} aria-label={`Remove ${s.name}`}><Trash2 size={14} /></button>
+                          )}
+                        </>
+                      )}
+                    </div>
+                    );
+                  })}
+                </div>
+              )}
+            </>
+          )}
+
+          {view === "register" && (
+            <>
+              <div style={styles.dateNav}>
+                <button style={styles.dateArrow} onClick={() => shiftDate(-1)} aria-label="Previous day"><ChevronLeft size={18} /></button>
+                <div style={styles.dateBlock}>
+                  <input type="date" value={selectedDate} onChange={(e) => setSelectedDate(e.target.value)} style={styles.dateInput} />
+                  <div style={styles.dateLabel}>{formatDateLabel(selectedDate)}</div>
+                </div>
+                <button style={styles.dateArrow} onClick={() => shiftDate(1)} aria-label="Next day"><ChevronRight size={18} /></button>
+              </div>
+
+              {activeStudents.length > 0 && (
+                <div style={styles.bulkMarkRow}>
+                  {(() => {
+                    const day = attendance[selectedDate] || {};
+                    const allPresent = activeStudents.every((s) => day[s.id] === "P");
+                    return (
+                      <button
+                        style={{ ...styles.bulkMarkBtn, borderColor: STATUS.P.color, color: allPresent ? "#fdfaf0" : STATUS.P.color, background: allPresent ? STATUS.P.color : "#fffdf7" }}
+                        onClick={toggleAllPresent}
+                      >
+                        {allPresent ? (
+                          <><X size={13} style={{ marginRight: 4, verticalAlign: -2 }} />Sabko clear karo</>
+                        ) : (
+                          <><Check size={13} style={{ marginRight: 4, verticalAlign: -2 }} />Sabko Present karo</>
+                        )}
+                      </button>
+                    );
+                  })()}
+                </div>
+              )}
+
+              {activeStudents.length === 0 ? (
+                <div style={styles.empty}>{students.length ? "Sabhi students inactive hain. Enrollment tab me unhe active karo." : "Pehle Enrollment tab se students add karo."}</div>
+              ) : (
+                <div style={styles.ledger}>
+                  {activeStudents.map((s, idx) => {
+                    const st = dayRecord[s.id];
+                    return (
+                      <div key={s.id} style={{ ...styles.ledgerRow, borderBottom: idx === activeStudents.length - 1 ? "none" : "1px dashed #d8cfae" }}>
+                        <div style={styles.rollBadge}>{s.roll}</div>
+                        <div style={{ ...styles.studentName, ...styles.studentNameLine }}>{s.name}</div>
+                        <div style={styles.statusGroup}>
+                          {["P", "A", "L"].map((code) => {
+                            const active = st === code;
+                            const anim = justStamped === s.id + code;
+                            return (
+                              <button key={code} className={anim ? "stamp-pop chalk-btn" : "chalk-btn"} onClick={() => markStatus(s.id, code)}
+                                style={{ ...styles.statusBtn, borderColor: STATUS[code].color, background: active ? STATUS[code].color : "transparent", color: active ? "#fdfaf0" : STATUS[code].color }}
+                                aria-label={STATUS[code].label} title={STATUS[code].label}>
+                                {STATUS[code].short}
+                              </button>
+                            );
+                          })}
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+
+              {activeStudents.length > 0 && (
+                <div style={styles.summary}>
+                  <div style={styles.summaryStamp}>
+                    <div style={styles.summaryPct}>{pct}%</div>
+                    <div style={styles.summaryPctLabel}>present today</div>
+                  </div>
+                  <div style={styles.summaryStats}>
+                    <div style={styles.summaryStatLine}>
+                      <span style={{ color: STATUS.P.color, fontWeight: 600 }}>{presentCount} Present</span>
+                      <span style={{ color: STATUS.A.color, fontWeight: 600 }}>{absentCount} Absent</span>
+                      <span style={{ color: STATUS.L.color, fontWeight: 600 }}>{leaveCount} Leave</span>
+                    </div>
+                    <div style={styles.summaryStatLine2}>{markedCount}/{activeStudents.length} marked · {activeStudents.length - markedCount} pending</div>
+                  </div>
+                </div>
+              )}
+            </>
+          )}
+
+          {view === "reports" && (
+            <>
+              <div style={styles.scopeRow} className="no-print">
+                {[
+                  { k: "month", label: "Monthly" },
+                  { k: "year", label: "Yearly" },
+                  { k: "student", label: "Student" },
+                  { k: "day", label: "Date-wise" },
+                  { k: "grid", label: "All Students" },
+                ].map((opt) => (
+                  <button key={opt.k} onClick={() => setReportScope(opt.k)}
+                    style={{ ...styles.scopeBtn, ...(reportScope === opt.k ? styles.scopeBtnActive : {}) }}>
+                    {opt.label}
+                  </button>
+                ))}
+              </div>
+
+              {reportScope === "month" && (
+                <>
+                  <div style={styles.dateNav} className="no-print">
+                    <button style={styles.dateArrow} onClick={() => shiftMonth(-1)} aria-label="Previous month"><ChevronLeft size={18} /></button>
+                    <div style={styles.dateBlock}>
+                      <input type="month" value={selectedMonth} onChange={(e) => setSelectedMonth(e.target.value)} style={styles.dateInput} />
+                      <div style={styles.dateLabel}>{monthLabel}</div>
+                    </div>
+                    <button style={styles.dateArrow} onClick={() => shiftMonth(1)} aria-label="Next month"><ChevronRight size={18} /></button>
+                  </div>
+
+                  <div style={styles.printTitle}>Monthly Attendance Report — {monthLabel}{classInfo.className ? ` · ${classInfo.className}` : ""}</div>
+                  <div className="print-only" style={styles.printOnlyHeader}>
+                    <div style={styles.printOnlyMainTitle}>Monthly Attendance Report</div>
+                    <div style={styles.printOnlyMeta}>
+                      {classInfo.className && <span>Class: {classInfo.className}</span>}
+                      {classInfo.teacher && <span>Teacher: {classInfo.teacher}</span>}
+                      <span>Month: {monthLabel}</span>
+                      <span>Generated: {new Date().toLocaleDateString("en-IN", { day: "numeric", month: "short", year: "numeric" })}</span>
+                    </div>
+                  </div>
+
+                  {students.length === 0 ? (
+                    <div style={styles.empty}>Abhi koi student enroll nahi hai.</div>
+                  ) : monthDates.length === 0 ? (
+                    <div style={styles.empty}>Is mahine ke liye abhi koi attendance mark nahi hui.</div>
+                  ) : (
+                    <>
+                      <div style={styles.reportTableWrap} className="print-table">
+                        <table style={styles.reportTable}>
+                          <thead><tr>
+                            <th style={styles.th}>Roll</th><th style={{ ...styles.th, textAlign: "left" }}>Name</th>
+                            <th style={styles.th}>P</th><th style={styles.th}>A</th><th style={styles.th}>L</th><th style={styles.th}>%</th>
+                          </tr></thead>
+                          <tbody>
+                            {monthlyStats.map((s) => (
+                              <tr key={s.id}>
+                                <td style={styles.td}>{s.roll}</td>
+                                <td style={{ ...styles.td, textAlign: "left" }}>{s.name}</td>
+                                <td style={{ ...styles.td, color: STATUS.P.color, fontWeight: 600 }}>{s.present}</td>
+                                <td style={{ ...styles.td, color: STATUS.A.color, fontWeight: 600 }}>{s.absent}</td>
+                                <td style={{ ...styles.td, color: STATUS.L.color, fontWeight: 600 }}>{s.leave}</td>
+                                <td style={{ ...styles.td, color: barColor(s.percent), fontWeight: 700 }}>{s.percent === null ? "—" : `${s.percent}%`}</td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
+                      <div style={styles.summary}>
+                        <div style={styles.summaryStamp}>
+                          <div style={styles.summaryPct}>{monthClassAvg === null ? "—" : `${monthClassAvg}%`}</div>
+                          <div style={styles.summaryPctLabel}>class average</div>
+                        </div>
+                        <div style={styles.summaryStats}><div style={styles.summaryStatLine2}>{monthDates.length} din mark hue is mahine</div></div>
+                        <button style={styles.printBtn} className="no-print" onClick={printReport}><Printer size={14} style={{ marginRight: 5, verticalAlign: -2 }} />Download PDF</button>
+                      </div>
+                      <div className="no-print" style={styles.pdfHint}>Print dialog me "Save as PDF" choose karo.</div>
+                    </>
+                  )}
+                </>
+              )}
+
+              {reportScope === "year" && (
+                <>
+                  <div style={styles.dateNav} className="no-print">
+                    <button style={styles.dateArrow} onClick={() => shiftYear(-1)} aria-label="Previous year"><ChevronLeft size={18} /></button>
+                    <div style={styles.dateBlock}>
+                      <input type="number" value={selectedYear} onChange={(e) => setSelectedYear(e.target.value)} style={{ ...styles.dateInput, width: 90, textAlign: "center" }} />
+                      <div style={styles.dateLabel}>Poora saal</div>
+                    </div>
+                    <button style={styles.dateArrow} onClick={() => shiftYear(1)} aria-label="Next year"><ChevronRight size={18} /></button>
+                  </div>
+
+                  <div style={styles.printTitle}>Yearly Attendance Report — {selectedYear}{classInfo.className ? ` · ${classInfo.className}` : ""}</div>
+                  <div className="print-only" style={styles.printOnlyHeader}>
+                    <div style={styles.printOnlyMainTitle}>Yearly Attendance Report</div>
+                    <div style={styles.printOnlyMeta}>
+                      {classInfo.className && <span>Class: {classInfo.className}</span>}
+                      {classInfo.teacher && <span>Teacher: {classInfo.teacher}</span>}
+                      <span>Year: {selectedYear}</span>
+                      <span>Generated: {new Date().toLocaleDateString("en-IN", { day: "numeric", month: "short", year: "numeric" })}</span>
+                    </div>
+                  </div>
+
+                  {students.length === 0 ? (
+                    <div style={styles.empty}>Abhi koi student enroll nahi hai.</div>
+                  ) : yearDates.length === 0 ? (
+                    <div style={styles.empty}>{selectedYear} me abhi koi attendance mark nahi hui.</div>
+                  ) : (
+                    <>
+                      <div style={styles.reportTableWrap} className="print-table">
+                        <table style={styles.reportTable}>
+                          <thead><tr>
+                            <th style={styles.th}>Roll</th><th style={{ ...styles.th, textAlign: "left" }}>Name</th>
+                            <th style={styles.th}>P</th><th style={styles.th}>A</th><th style={styles.th}>L</th>
+                            <th style={styles.th}>Marked</th><th style={styles.th}>%</th>
+                          </tr></thead>
+                          <tbody>
+                            {yearlyStats.map((s) => (
+                              <tr key={s.id}>
+                                <td style={styles.td}>{s.roll}</td>
+                                <td style={{ ...styles.td, textAlign: "left" }}>{s.name}</td>
+                                <td style={{ ...styles.td, color: STATUS.P.color, fontWeight: 600 }}>{s.present}</td>
+                                <td style={{ ...styles.td, color: STATUS.A.color, fontWeight: 600 }}>{s.absent}</td>
+                                <td style={{ ...styles.td, color: STATUS.L.color, fontWeight: 600 }}>{s.leave}</td>
+                                <td style={styles.td}>{s.total}</td>
+                                <td style={{ ...styles.td, color: barColor(s.percent), fontWeight: 700 }}>{s.percent === null ? "—" : `${s.percent}%`}</td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
+                      <div style={styles.summary}>
+                        <div style={styles.summaryStamp}>
+                          <div style={styles.summaryPct}>{yearClassAvg === null ? "—" : `${yearClassAvg}%`}</div>
+                          <div style={styles.summaryPctLabel}>class average</div>
+                        </div>
+                        <div style={styles.summaryStats}><div style={styles.summaryStatLine2}>{yearDates.length} din mark hue {selectedYear} me</div></div>
+                        <button style={styles.printBtn} className="no-print" onClick={printReport}><Printer size={14} style={{ marginRight: 5, verticalAlign: -2 }} />Download PDF</button>
+                      </div>
+                      <div className="no-print" style={styles.pdfHint}>Print dialog me "Save as PDF" choose karo.</div>
+                    </>
+                  )}
+                </>
+              )}
+
+              {reportScope === "student" && (
+                <>
+                  <div className="no-print" style={styles.studentPickRow}>
+                    <select style={styles.selectInput} value={selectedStudentId} onChange={(e) => setSelectedStudentId(e.target.value)}>
+                      {students.length === 0 && <option value="">Koi student nahi</option>}
+                      {students.map((s) => (<option key={s.id} value={s.id}>{s.roll} — {s.name}</option>))}
+                    </select>
+                    <input type="number" value={selectedYear} onChange={(e) => setSelectedYear(e.target.value)} style={{ ...styles.dateInput, width: 84, textAlign: "center" }} />
+                  </div>
+
+                  {!selectedStudent ? (
+                    <div style={styles.empty}>Pehle Enrollment tab se students add karo.</div>
+                  ) : (
+                    <>
+                      <div style={styles.printTitle}>Student Attendance Report — {selectedYear}</div>
+                      <div className="print-only" style={styles.printOnlyHeader}>
+                        <div style={styles.printOnlyMainTitle}>Student Attendance Report</div>
+                        <div style={styles.printOnlyMeta}>
+                          <span>Student: {selectedStudent.name} (Roll {selectedStudent.roll})</span>
+                          {classInfo.className && <span>Class: {classInfo.className}</span>}
+                          <span>Year: {selectedYear}</span>
+                          <span>Generated: {new Date().toLocaleDateString("en-IN", { day: "numeric", month: "short", year: "numeric" })}</span>
+                        </div>
+                      </div>
+
+                      <div style={styles.studentCard}>
+                        <div style={styles.studentCardIcon}><User size={20} color="#6B4226" /></div>
+                        <div>
+                          <div style={styles.studentCardName}>{selectedStudent.name}</div>
+                          <div style={styles.studentCardMeta}>Roll No. {selectedStudent.roll}</div>
+                        </div>
+                        <div style={{ marginLeft: "auto", textAlign: "right" }}>
+                          <div style={{ ...styles.summaryPct, color: barColor(studentYearTotal.percent), fontSize: 20 }}>
+                            {studentYearTotal.percent === null ? "—" : `${studentYearTotal.percent}%`}
+                          </div>
+                          <div style={styles.summaryPctLabel}>{selectedYear} overall</div>
+                        </div>
+                      </div>
+
+                      <div style={styles.reportTableWrap} className="print-table">
+                        <table style={styles.reportTable}>
+                          <thead><tr>
+                            <th style={{ ...styles.th, textAlign: "left" }}>Month</th>
+                            <th style={styles.th}>P</th><th style={styles.th}>A</th><th style={styles.th}>L</th>
+                            <th style={styles.th}>Marked</th><th style={styles.th}>%</th>
+                          </tr></thead>
+                          <tbody>
+                            {studentMonthRows.map((row) => (
+                              <tr key={row.month}>
+                                <td style={{ ...styles.td, textAlign: "left" }}>{row.month}</td>
+                                <td style={{ ...styles.td, color: STATUS.P.color, fontWeight: 600 }}>{row.present}</td>
+                                <td style={{ ...styles.td, color: STATUS.A.color, fontWeight: 600 }}>{row.absent}</td>
+                                <td style={{ ...styles.td, color: STATUS.L.color, fontWeight: 600 }}>{row.leave}</td>
+                                <td style={styles.td}>{row.total}</td>
+                                <td style={{ ...styles.td, color: barColor(row.percent), fontWeight: 700 }}>{row.percent === null ? "—" : `${row.percent}%`}</td>
+                              </tr>
+                            ))}
+                            <tr>
+                              <td style={{ ...styles.td, textAlign: "left", fontWeight: 700 }}>Year Total</td>
+                              <td style={{ ...styles.td, color: STATUS.P.color, fontWeight: 700 }}>{studentYearTotal.present}</td>
+                              <td style={{ ...styles.td, color: STATUS.A.color, fontWeight: 700 }}>{studentYearTotal.absent}</td>
+                              <td style={{ ...styles.td, color: STATUS.L.color, fontWeight: 700 }}>{studentYearTotal.leave}</td>
+                              <td style={{ ...styles.td, fontWeight: 700 }}>{studentYearTotal.total}</td>
+                              <td style={{ ...styles.td, color: barColor(studentYearTotal.percent), fontWeight: 700 }}>{studentYearTotal.percent === null ? "—" : `${studentYearTotal.percent}%`}</td>
+                            </tr>
+                          </tbody>
+                        </table>
+                      </div>
+
+                      {studentAbsentDates.length > 0 && (
+                        <div style={styles.absentBlock}>
+                          <div style={styles.sectionLabel}>Absent dates ({studentAbsentDates.length})</div>
+                          <div style={styles.chipWrap}>
+                            {studentAbsentDates.map((d, i) => (<span key={i} style={styles.chip}>{d}</span>))}
+                          </div>
+                        </div>
+                      )}
+
+                      <div style={styles.summary}>
+                        <div style={{ flex: 1 }} />
+                        <button style={styles.printBtn} className="no-print" onClick={printReport}><Printer size={14} style={{ marginRight: 5, verticalAlign: -2 }} />Download PDF</button>
+                      </div>
+                      <div className="no-print" style={styles.pdfHint}>Print dialog me "Save as PDF" choose karo.</div>
+                    </>
+                  )}
+                </>
+              )}
+
+              {reportScope === "day" && (
+                <>
+                  <div className="no-print" style={styles.studentPickRow}>
+                    <select style={styles.selectInput} value={selectedStudentId} onChange={(e) => setSelectedStudentId(e.target.value)}>
+                      {students.length === 0 && <option value="">Koi student nahi</option>}
+                      {students.map((s) => (<option key={s.id} value={s.id}>{s.roll} — {s.name}</option>))}
+                    </select>
+                  </div>
+                  <div style={styles.dateNav} className="no-print">
+                    <button style={styles.dateArrow} onClick={() => shiftMonth(-1)} aria-label="Previous month"><ChevronLeft size={18} /></button>
+                    <div style={styles.dateBlock}>
+                      <input type="month" value={selectedMonth} onChange={(e) => setSelectedMonth(e.target.value)} style={styles.dateInput} />
+                      <div style={styles.dateLabel}>{monthLabel}</div>
+                    </div>
+                    <button style={styles.dateArrow} onClick={() => shiftMonth(1)} aria-label="Next month"><ChevronRight size={18} /></button>
+                  </div>
+
+                  {!selectedStudent ? (
+                    <div style={styles.empty}>Pehle Enrollment tab se students add karo.</div>
+                  ) : (
+                    <>
+                      <div style={styles.printTitle}>Date-wise Attendance — {selectedStudent.name} · {monthLabel}</div>
+                      <div className="print-only" style={styles.printOnlyHeader}>
+                        <div style={styles.printOnlyMainTitle}>Date-wise Attendance Record</div>
+                        <div style={styles.printOnlyMeta}>
+                          <span>Student: {selectedStudent.name} (Roll {selectedStudent.roll})</span>
+                          {classInfo.className && <span>Class: {classInfo.className}</span>}
+                          <span>Month: {monthLabel}</span>
+                          <span>Generated: {new Date().toLocaleDateString("en-IN", { day: "numeric", month: "short", year: "numeric" })}</span>
+                        </div>
+                      </div>
+
+                      <div style={styles.studentCard}>
+                        <div style={styles.studentCardIcon}><User size={20} color="#6B4226" /></div>
+                        <div>
+                          <div style={styles.studentCardName}>{selectedStudent.name}</div>
+                          <div style={styles.studentCardMeta}>Roll No. {selectedStudent.roll}</div>
+                        </div>
+                      </div>
+
+                      <div style={styles.reportTableWrap} className="print-table">
+                        <table style={styles.reportTable}>
+                          <thead><tr>
+                            <th style={{ ...styles.th, textAlign: "left" }}>Date</th>
+                            <th style={styles.th}>Day</th>
+                            <th style={{ ...styles.th, textAlign: "left" }}>Status</th>
+                          </tr></thead>
+                          <tbody>
+                            {studentDayList.map((row) => {
+                              const info = row.status ? STATUS[row.status] : null;
+                              return (
+                                <tr key={row.date}>
+                                  <td style={{ ...styles.td, textAlign: "left" }}>
+                                    {String(row.day).padStart(2, "0")} {monthLabel.split(" ")[0]}
+                                  </td>
+                                  <td style={styles.td}>{row.weekday}</td>
+                                  <td style={{ ...styles.td, textAlign: "left" }}>
+                                    {info ? (
+                                      <span style={{ color: info.color, fontWeight: 700 }}>{info.label}</span>
+                                    ) : (
+                                      <span style={{ color: "#b3a889" }}>Not marked</span>
+                                    )}
+                                  </td>
+                                </tr>
+                              );
+                            })}
+                          </tbody>
+                        </table>
+                      </div>
+
+                      <div style={styles.summary}>
+                        <div style={{ flex: 1 }} />
+                        <button style={styles.printBtn} className="no-print" onClick={printReport}><Printer size={14} style={{ marginRight: 5, verticalAlign: -2 }} />Download PDF</button>
+                      </div>
+                      <div className="no-print" style={styles.pdfHint}>Print dialog me "Save as PDF" choose karo.</div>
+                    </>
+                  )}
+                </>
+              )}
+
+              {reportScope === "grid" && (
+                <>
+                  <div style={styles.dateNav} className="no-print">
+                    <button style={styles.dateArrow} onClick={() => shiftMonth(-1)} aria-label="Previous month"><ChevronLeft size={18} /></button>
+                    <div style={styles.dateBlock}>
+                      <input type="month" value={selectedMonth} onChange={(e) => setSelectedMonth(e.target.value)} style={styles.dateInput} />
+                      <div style={styles.dateLabel}>{monthLabel}</div>
+                    </div>
+                    <button style={styles.dateArrow} onClick={() => shiftMonth(1)} aria-label="Next month"><ChevronRight size={18} /></button>
+                  </div>
+
+                  <div style={styles.printTitle}>Attendance Register — {monthLabel}{classInfo.className ? ` · ${classInfo.className}` : ""}</div>
+                  <div className="print-only" style={styles.printOnlyHeader}>
+                    <div style={styles.printOnlyMainTitle}>Attendance Register</div>
+                    <div style={styles.printOnlyMeta}>
+                      {classInfo.className && <span>Class: {classInfo.className}</span>}
+                      {classInfo.teacher && <span>Teacher: {classInfo.teacher}</span>}
+                      <span>Month: {monthLabel}</span>
+                      <span>Legend: P=Present, A=Absent, L=Leave</span>
+                    </div>
+                  </div>
+
+                  {students.length === 0 ? (
+                    <div style={styles.empty}>Abhi koi student enroll nahi hai.</div>
+                  ) : (
+                    <>
+                      <div className="no-print" style={styles.pdfHint}>{"\u2190"} Left-right scroll karo poori table dekhne ke liye</div>
+                      <div style={styles.gridTableWrap} className="print-table">
+                        <table style={styles.gridTable} className="grid-print-table">
+                          <thead>
+                            <tr>
+                              <th style={styles.gridThName} className="grid-name-col">Roll</th>
+                              <th style={{ ...styles.gridThName, textAlign: "left" }} className="grid-name-col">Name</th>
+                              {Array.from({ length: daysInSelectedMonth }, (_, i) => i + 1).map((d) => (
+                                <th key={d} style={styles.gridThDay}>{d}</th>
+                              ))}
+                              <th style={styles.gridThTotal}>Total P</th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {gridRows.map((s) => (
+                              <tr key={s.id}>
+                                <td style={styles.gridTdName} className="grid-name-col">{s.roll}</td>
+                                <td style={{ ...styles.gridTdName, textAlign: "left" }} className="grid-name-col">{s.name}</td>
+                                {s.days.map((st, i) => {
+                                  const info = st ? STATUS[st] : null;
+                                  return (
+                                    <td key={i} style={{ ...styles.gridTdDay, color: info ? info.color : "#c9c0a3", fontWeight: info ? 700 : 400 }}>
+                                      {info ? info.short : "·"}
+                                    </td>
+                                  );
+                                })}
+                                <td style={styles.gridTdTotal}>{s.totalPresent}</td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
+                      <div className="no-print" style={{ ...styles.pdfHint, marginTop: 6 }}>
+                        Legend: <span style={{ color: STATUS.P.color, fontWeight: 700 }}>P</span> Present ·{" "}
+                        <span style={{ color: STATUS.A.color, fontWeight: 700 }}>A</span> Absent ·{" "}
+                        <span style={{ color: STATUS.L.color, fontWeight: 700 }}>L</span> Leave
+                      </div>
+
+                      <div style={styles.summary}>
+                        <div style={{ flex: 1 }} />
+                        <button style={styles.printBtn} className="no-print" onClick={printReport}><Printer size={14} style={{ marginRight: 5, verticalAlign: -2 }} />Download PDF</button>
+                      </div>
+                      <div className="no-print" style={styles.pdfHint}>Print dialog me "Save as PDF" (landscape mode recommend) choose karo.</div>
+                    </>
+                  )}
+                </>
+              )}
+            </>
+          )}
+        </div>
+
+        {saveError && <div style={styles.errorBanner} className="no-print">Save nahi ho paaya — data sirf is session ke liye hai.</div>}
+      </div>
+    </div>
+  );
+}
+
+const styles = {
+  outer: { minHeight: "100vh", background: "#e9e3ce", display: "flex", flexDirection: "column", alignItems: "center", padding: "20px 12px", fontFamily: "'Inter', sans-serif" },
+  accountBar: { width: "100%", maxWidth: 480, display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 10, padding: "0 4px" },
+  accountEmail: { fontSize: 11.5, color: "#6B4226", fontFamily: "'IBM Plex Mono', monospace", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", maxWidth: "70%" },
+  guestTag: { marginLeft: 6, background: "#E8C468", color: "#6B4226", fontFamily: "'Inter', sans-serif", fontWeight: 700, fontSize: 9, padding: "2px 5px", borderRadius: 4, verticalAlign: "middle" },
+  logoutBtn: { background: "#fffdf7", border: "1px solid #d8cfae", borderRadius: 7, padding: "5px 10px", fontSize: 11.5, fontWeight: 600, color: "#6B4226", cursor: "pointer", fontFamily: "'Inter', sans-serif", flexShrink: 0 },
+  teacherPanelBtn: { background: "#fffdf7", border: "1px solid #d8cfae", borderRadius: 7, padding: "5px 10px", fontSize: 11.5, fontWeight: 600, color: "#6B4226", cursor: "pointer", fontFamily: "'Inter', sans-serif", flexShrink: 0 },
+  teacherPanelWrap: { width: "100%", maxWidth: 480, background: "#fffdf7", border: "1px solid #e3d9b8", borderRadius: 10, padding: 12, marginBottom: 10 },
+  teacherPanelTitle: { fontSize: 13, fontWeight: 700, color: "#6B4226", marginBottom: 4 },
+  teacherFormRow: { display: "flex", gap: 8, flexWrap: "wrap" },
+  teacherCreatedBox: { background: "#eaf3ec", border: "1px solid #cfe3d5", borderRadius: 8, padding: "8px 10px", fontSize: 12.5, color: "#2f5c3c", marginBottom: 10 },
+  teacherRow: { display: "flex", alignItems: "center", justifyContent: "space-between", padding: "6px 0", borderBottom: "1px solid #ece3c4", fontSize: 12.5, color: "#6B4226", fontFamily: "'IBM Plex Mono', monospace" },
+  teacherRemoveBtn: { background: "transparent", border: "1px solid #C1503D", borderRadius: 6, padding: "4px 9px", fontSize: 11, color: "#C1503D", cursor: "pointer", fontFamily: "'Inter', sans-serif" },
+  linkBtnDark: { background: "transparent", border: "none", color: "#2f5c3c", fontSize: 11, cursor: "pointer", textDecoration: "underline", marginTop: 4, fontFamily: "'Inter', sans-serif" },
+  viewAsRow: { width: "100%", maxWidth: 480, display: "flex", alignItems: "center", gap: 8, marginBottom: 8, padding: "0 4px", flexWrap: "wrap" },
+  viewAsLabel: { fontSize: 11.5, color: "#6B4226", fontFamily: "'Inter', sans-serif", fontWeight: 600 },
+  viewAsSelect: { flex: 1, minWidth: 160, background: "#fffdf7", border: "1px solid #d8cfae", borderRadius: 7, padding: "5px 8px", fontSize: 12, color: "#6B4226", fontFamily: "'Inter', sans-serif" },
+  viewingBanner: { width: "100%", maxWidth: 480, background: "#fff3d6", border: "1px solid #E8C468", borderRadius: 8, padding: "7px 10px", fontSize: 12, color: "#6B4226", marginBottom: 10, fontFamily: "'Inter', sans-serif" },
+  frame: { width: "100%", maxWidth: 480, background: "#6B4226", borderRadius: 18, padding: 10, boxShadow: "0 14px 30px rgba(43,35,24,0.25)" },
+  board: { position: "relative", background: "linear-gradient(160deg, #1F3D2B 0%, #16311F 100%)", borderRadius: 12, padding: "20px 18px 16px", overflow: "hidden" },
+  boardTexture: { position: "absolute", inset: 0, backgroundImage: "radial-gradient(circle at 20% 30%, rgba(255,255,255,0.03) 0, transparent 2px), radial-gradient(circle at 70% 60%, rgba(255,255,255,0.025) 0, transparent 2px), radial-gradient(circle at 40% 80%, rgba(255,255,255,0.03) 0, transparent 2px)", backgroundSize: "40px 40px, 55px 55px, 33px 33px" },
+  chalkTitle: { fontFamily: "'Kalam', cursive", fontWeight: 700, fontSize: 30, color: "#F5F3E7", textShadow: "0 0 1px rgba(245,243,231,0.4)", lineHeight: 1.15 },
+  chalkSub: { fontFamily: "'Kalam', cursive", fontSize: 14, color: "#E8C468", marginTop: 2, marginBottom: 14 },
+  classSwitchRow: { display: "flex", alignItems: "center", gap: 8, marginBottom: 10 },
+  classSelect: { flex: 1, background: "rgba(245,243,231,0.12)", border: "1px solid rgba(245,243,231,0.3)", borderRadius: 7, color: "#F5F3E7", fontFamily: "'Inter', sans-serif", fontSize: 12.5, padding: "6px 8px", outline: "none", minWidth: 0 },
+  classIconBtn: { background: "rgba(245,243,231,0.14)", border: "1px solid rgba(245,243,231,0.3)", borderRadius: 7, color: "#F5F3E7", width: 30, height: 30, display: "flex", alignItems: "center", justifyContent: "center", cursor: "pointer", flexShrink: 0 },
+  newClassRow: { display: "flex", alignItems: "center", gap: 6, marginBottom: 10, background: "rgba(0,0,0,0.15)", padding: 6, borderRadius: 8 },
+  classRow: { display: "flex", gap: 8 },
+  chalkInput: { flex: 1, background: "transparent", border: "none", borderBottom: "1.5px dashed rgba(245,243,231,0.45)", color: "#F5F3E7", fontFamily: "'Kalam', cursive", fontSize: 14, padding: "4px 2px", outline: "none", minWidth: 0 },
+  tabRow: { display: "flex", gap: 6, margin: "10px 2px 8px" },
+  tabBtn: { flex: 1, padding: "9px 0", borderRadius: 9, border: "none", background: "rgba(31,61,43,0.85)", color: "#F5F3E7", fontFamily: "'Inter', sans-serif", fontWeight: 600, fontSize: 12.5, cursor: "pointer" },
+  tabBtnActive: { background: "#E8C468", color: "#1F3D2B" },
+  paper: { background: "#F2ECD8", borderRadius: 12, padding: 16, backgroundImage: "repeating-linear-gradient(0deg, transparent, transparent 27px, rgba(107,66,38,0.07) 28px)" },
+  sectionLabel: { fontSize: 12, fontWeight: 600, color: "#6B4226", marginBottom: 8 },
+  scopeRow: { display: "flex", gap: 6, marginBottom: 14, background: "#e3d9b8", borderRadius: 9, padding: 3, flexWrap: "wrap" },
+  scopeBtn: { flex: "1 1 30%", minWidth: 90, padding: "7px 4px", borderRadius: 7, border: "none", background: "transparent", color: "#6B4226", fontFamily: "'Inter', sans-serif", fontWeight: 600, fontSize: 11.5, cursor: "pointer" },
+  scopeBtnActive: { background: "#fffdf7", color: "#1F3D2B", boxShadow: "0 1px 3px rgba(0,0,0,0.12)" },
+  dateNav: { display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 14 },
+  dateArrow: { background: "#fff", border: "1px solid #d8cfae", borderRadius: 8, width: 34, height: 34, display: "flex", alignItems: "center", justifyContent: "center", cursor: "pointer", color: "#4A3F2A", flexShrink: 0 },
+  bulkMarkRow: { display: "flex", gap: 8, marginBottom: 14 },
+  bulkMarkBtn: { flex: 1, background: "#fffdf7", border: "1.5px solid", borderRadius: 8, padding: "8px 6px", fontFamily: "'Inter', sans-serif", fontWeight: 600, fontSize: 12, cursor: "pointer" },
+  dateBlock: { textAlign: "center", flex: 1 },
+  dateInput: { fontFamily: "'IBM Plex Mono', monospace", fontSize: 13, border: "1px solid #d8cfae", borderRadius: 8, padding: "5px 8px", background: "#fff", color: "#2B2318" },
+  dateLabel: { fontFamily: "'Kalam', cursive", fontSize: 13, color: "#6B4226", marginTop: 3 },
+  addRow: { display: "flex", gap: 8, marginBottom: 16 },
+  textInput: { border: "1px solid #d8cfae", borderRadius: 8, padding: "9px 10px", fontSize: 14, fontFamily: "'Inter', sans-serif", background: "#fffdf7", color: "#2B2318", outline: "none", minWidth: 0 },
+  selectInput: { flex: 1, border: "1px solid #d8cfae", borderRadius: 8, padding: "8px 10px", fontSize: 13, fontFamily: "'Inter', sans-serif", background: "#fffdf7", color: "#2B2318", outline: "none", minWidth: 0 },
+  bulkArea: { width: "100%", border: "1px solid #d8cfae", borderRadius: 8, padding: "9px 10px", fontSize: 13, fontFamily: "'IBM Plex Mono', monospace", background: "#fffdf7", color: "#2B2318", outline: "none", resize: "vertical", marginBottom: 8 },
+  bulkBtn: { background: "#E8C468", color: "#1F3D2B", border: "none", borderRadius: 8, padding: "9px 14px", fontWeight: 700, fontSize: 13, cursor: "pointer", fontFamily: "'Inter', sans-serif" },
+  addBtn: { background: "#1F3D2B", color: "#F5F3E7", border: "none", borderRadius: 8, width: 38, display: "flex", alignItems: "center", justifyContent: "center", cursor: "pointer", flexShrink: 0 },
+  ledger: { background: "#fffdf7", border: "1px solid #e3d9b8", borderRadius: 10, overflow: "hidden" },
+  ledgerRow: { display: "flex", alignItems: "center", gap: 10, padding: "10px 10px" },
+  rollBadge: { fontFamily: "'IBM Plex Mono', monospace", fontSize: 12, color: "#6B4226", width: 28, textAlign: "center", flexShrink: 0 },
+  studentName: { flex: 1, fontSize: 14, fontWeight: 500, color: "#2B2318", minWidth: 0 },
+  studentNameLine: { overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" },
+  inactiveTag: { marginLeft: 8, fontSize: 9.5, fontWeight: 700, color: "#8a8368", background: "#e3d9b8", padding: "2px 6px", borderRadius: 5, verticalAlign: "middle" },
+  enrolledDate: { fontSize: 10.5, color: "#a89b78", fontFamily: "'IBM Plex Mono', monospace", marginTop: 1 },
+  statusGroup: { display: "flex", gap: 5, flexShrink: 0 },
+  statusBtn: { width: 28, height: 28, borderRadius: "50%", border: "1.5px solid", fontFamily: "'Kalam', cursive", fontWeight: 700, fontSize: 13, cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", transition: "background 0.15s, color 0.15s" },
+  deleteBtn: { background: "transparent", border: "none", color: "#b3a889", cursor: "pointer", padding: 4, flexShrink: 0 },
+  empty: { textAlign: "center", color: "#8a8368", fontSize: 13, padding: "26px 10px", fontFamily: "'Inter', sans-serif" },
+  summary: { display: "flex", alignItems: "center", gap: 12, marginTop: 16, padding: "12px 14px", background: "#fffdf7", border: "1px solid #e3d9b8", borderRadius: 10, flexWrap: "wrap" },
+  summaryStamp: { width: 58, height: 58, borderRadius: "50%", border: "2.5px dashed #4C8C5B", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", flexShrink: 0, transform: "rotate(-6deg)" },
+  summaryPct: { fontFamily: "'Kalam', cursive", fontWeight: 700, fontSize: 15, color: "#4C8C5B", lineHeight: 1 },
+  summaryPctLabel: { fontSize: 7.5, color: "#4C8C5B", fontWeight: 600, marginTop: 1, textAlign: "center" },
+  summaryStats: { flex: 1, minWidth: 0 },
+  summaryStatLine: { display: "flex", gap: 10, fontSize: 12.5, flexWrap: "wrap" },
+  summaryStatLine2: { fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, color: "#8a8368", marginTop: 4 },
+  printTitle: { fontFamily: "'Kalam', cursive", fontSize: 15, color: "#6B4226", marginBottom: 12, textAlign: "center" },
+  printOnlyHeader: { marginBottom: 16, borderBottom: "2px solid #333", paddingBottom: 10 },
+  printOnlyMainTitle: { fontFamily: "'Inter', sans-serif", fontSize: 20, fontWeight: 700, color: "#111", marginBottom: 6 },
+  printOnlyMeta: { display: "flex", gap: 16, flexWrap: "wrap", fontSize: 12, color: "#333", fontFamily: "'Inter', sans-serif" },
+  pdfHint: { fontSize: 11, color: "#8a8368", textAlign: "center", marginTop: 8, fontFamily: "'Inter', sans-serif" },
+  reportTableWrap: { background: "#fffdf7", border: "1px solid #e3d9b8", borderRadius: 10, overflow: "auto" },
+  gridTableWrap: { background: "#fffdf7", border: "1px solid #e3d9b8", borderRadius: 10, overflow: "auto", maxWidth: "100%" },
+  gridTable: { borderCollapse: "collapse", fontFamily: "'Inter', sans-serif" },
+  gridThName: { position: "sticky", left: 0, background: "#F2ECD8", fontSize: 10.5, fontWeight: 700, color: "#6B4226", padding: "7px 6px", textAlign: "center", borderBottom: "1.5px solid #e3d9b8", borderRight: "1px solid #e3d9b8", whiteSpace: "nowrap", zIndex: 1 },
+  gridThDay: { fontSize: 10, fontWeight: 700, color: "#6B4226", padding: "7px 4px", textAlign: "center", borderBottom: "1.5px solid #e3d9b8", minWidth: 22, whiteSpace: "nowrap" },
+  gridThTotal: { fontSize: 10, fontWeight: 700, color: "#6B4226", padding: "7px 6px", textAlign: "center", borderBottom: "1.5px solid #e3d9b8", background: "#F2ECD8", whiteSpace: "nowrap" },
+  gridTdName: { position: "sticky", left: 0, background: "#fffdf7", fontSize: 11.5, padding: "6px 6px", textAlign: "center", borderBottom: "1px dashed #e3d9b8", borderRight: "1px solid #e3d9b8", color: "#2B2318", whiteSpace: "nowrap" },
+  gridTdDay: { fontSize: 11, padding: "6px 4px", textAlign: "center", borderBottom: "1px dashed #e3d9b8", minWidth: 22 },
+  gridTdTotal: { fontSize: 11.5, fontWeight: 700, padding: "6px 6px", textAlign: "center", borderBottom: "1px dashed #e3d9b8", background: "#F2ECD8", color: "#2B2318" },
+  reportTable: { width: "100%", borderCollapse: "collapse", fontFamily: "'Inter', sans-serif" },
+  th: { fontSize: 11, fontWeight: 700, color: "#6B4226", padding: "8px 6px", textAlign: "center", borderBottom: "1.5px solid #e3d9b8", textTransform: "uppercase", letterSpacing: 0.3, whiteSpace: "nowrap" },
+  td: { fontSize: 12.5, padding: "7px 6px", textAlign: "center", borderBottom: "1px dashed #e3d9b8", color: "#2B2318", whiteSpace: "nowrap" },
+  printBtn: { background: "#1F3D2B", color: "#F5F3E7", border: "none", borderRadius: 8, padding: "8px 12px", fontWeight: 600, fontSize: 12, cursor: "pointer", fontFamily: "'Inter', sans-serif", flexShrink: 0 },
+  errorBanner: { marginTop: 10, fontSize: 11, color: "#F5F3E7", textAlign: "center" },
+  studentPickRow: { display: "flex", gap: 8, marginBottom: 14 },
+  studentCard: { display: "flex", alignItems: "center", gap: 12, background: "#fffdf7", border: "1px solid #e3d9b8", borderRadius: 10, padding: "12px 14px", marginBottom: 14 },
+  studentCardIcon: { width: 38, height: 38, borderRadius: "50%", background: "#F2ECD8", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 },
+  studentCardName: { fontSize: 15, fontWeight: 700, color: "#2B2318" },
+  studentCardMeta: { fontSize: 11.5, fontFamily: "'IBM Plex Mono', monospace", color: "#8a8368" },
+  absentBlock: { marginTop: 14 },
+  chipWrap: { display: "flex", flexWrap: "wrap", gap: 6 },
+  chip: { background: "#fdece7", color: "#C1503D", fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, padding: "4px 8px", borderRadius: 6, border: "1px solid #f0cfc5" },
+};
+
+/* ============================================================
+   SUPABASE AUTH + CLOUD STORAGE
+   ============================================================ */
+
+const SB_URL_KEY = "attendance_sb_url";
+const SB_ANON_KEY = "attendance_sb_anon_key";
+
+// Agar ye do values yahan bhar di jaayein, to app seedha isi Supabase project se
+// connect ho jaayegi — kisi bhi browser/device par Setup screen nahi dikhega,
+// seedha Login/Sign-up aayega. Anon key public/client-safe hai; data ki security
+// Row Level Security policy se hoti hai (jo SETUP_SQL me set hoti hai).
+const EMBEDDED_SUPABASE_URL = "https://rwktftprifzqbylicalp.supabase.co";
+const EMBEDDED_SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InJ3a3RmdHByaWZ6cWJ5bGljYWxwIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODYwOTA4NjUsImV4cCI6MjEwMTY2Njg2NX0.S1nilVss6DxzEd6TxK_bsnLtlWAhNxey02VVMdlmS_E";
+
+const SETUP_SQL = `create table if not exists app_storage (
+  user_id uuid references auth.users(id) on delete cascade not null,
+  key text not null,
+  value text,
+  updated_at timestamptz default now(),
+  primary key (user_id, key)
+);
+
+alter table app_storage enable row level security;
+
+-- Class Teacher login system (owner sets up each teacher's login;
+-- role decides admin vs class-teacher view — same pattern as the fee register app).
+create table if not exists profiles (
+  id uuid primary key references auth.users(id) on delete cascade,
+  email text,
+  role text not null check (role in ('admin','teacher')),
+  created_at timestamptz default now()
+);
+
+alter table profiles enable row level security;
+
+-- Security definer function to check "is the current user an admin" without
+-- causing infinite RLS recursion when used inside profiles' own policies.
+create or replace function public.is_admin()
+returns boolean
+language sql
+security definer
+set search_path = public
+as $$
+  select exists (
+    select 1 from profiles where id = auth.uid() and role = 'admin'
+  );
+$$;
+
+-- Admin can fully view/edit ANY teacher's class data; everyone else only their own.
+create policy "Users manage own data, admin manages all"
+on app_storage for all
+using (auth.uid() = user_id or public.is_admin())
+with check (auth.uid() = user_id or public.is_admin());
+
+create policy "Read own profile"
+on profiles for select
+using (auth.uid() = id);
+
+create policy "Admin reads all profiles"
+on profiles for select
+using (public.is_admin());
+
+create policy "Admin inserts teacher profiles"
+on profiles for insert
+with check (public.is_admin());
+
+create policy "Admin deletes teacher profiles"
+on profiles for delete
+using (public.is_admin());
+
+-- The very first person to ever log in (jab profiles table khali ho) apne aap
+-- 'admin' ban jaata hai — is se pehla owner account manually SQL se banane
+-- ki zaroorat nahi padti. Uske baad admin hi teacher logins bana sakta hai.
+create policy "Bootstrap first admin"
+on profiles for insert
+with check (auth.uid() = id and not exists (select 1 from profiles));`;
+
+function makeSupabaseStorage(client, userId) {
+  return {
+    get: async (key) => {
+      try {
+        const { data, error } = await client
+          .from("app_storage")
+          .select("value")
+          .eq("user_id", userId)
+          .eq("key", key)
+          .maybeSingle();
+        if (error || !data) return null;
+        return { key, value: data.value };
+      } catch (e) {
+        return null;
+      }
+    },
+    set: async (key, value) => {
+      try {
+        const { error } = await client
+          .from("app_storage")
+          .upsert({ user_id: userId, key, value, updated_at: new Date().toISOString() }, { onConflict: "user_id,key" });
+        if (error) return null;
+        return { key, value };
+      } catch (e) {
+        return null;
+      }
+    },
+    delete: async (key) => {
+      try {
+        const { error } = await client.from("app_storage").delete().eq("user_id", userId).eq("key", key);
+        return error ? null : { key, deleted: true };
+      } catch (e) {
+        return null;
+      }
+    },
+    list: async (prefix) => {
+      try {
+        let q = client.from("app_storage").select("key").eq("user_id", userId);
+        if (prefix) q = q.like("key", prefix + "%");
+        const { data, error } = await q;
+        if (error) return null;
+        return { keys: (data || []).map((r) => r.key), prefix };
+      } catch (e) {
+        return null;
+      }
+    },
+  };
+}
+
+function SetupScreen({ onDone }) {
+  const [url, setUrl] = useState("");
+  const [anonKey, setAnonKey] = useState("");
+  const [copied, setCopied] = useState(false);
+  const [err, setErr] = useState("");
+
+  const copySql = async () => {
+    try {
+      await navigator.clipboard.writeText(SETUP_SQL);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1600);
+    } catch (e) {}
+  };
+
+  const submit = () => {
+    const u = url.trim();
+    const k = anonKey.trim();
+    if (!u || !k) {
+      setErr("Dono fields bharo — Project URL aur Anon Public Key.");
+      return;
+    }
+    if (!/^https:\/\/.+\.supabase\.co\/?$/.test(u)) {
+      setErr("URL kuch aisa hona chahiye: https://xxxxx.supabase.co");
+      return;
+    }
+    localStorage.setItem(SB_URL_KEY, u);
+    localStorage.setItem(SB_ANON_KEY, k);
+    onDone(u, k);
+  };
+
+  return (
+    <div style={authStyles.wrap}>
+      <div style={authStyles.card}>
+        <div style={authStyles.title}>Supabase Setup</div>
+        <div style={authStyles.subtitle}>Ek baar ka setup — apna free Supabase project connect karo.</div>
+
+        <div style={authStyles.stepBlock}>
+          <div style={authStyles.stepTitle}>1. Table banao</div>
+          <div style={authStyles.stepText}>
+            <a href="https://supabase.com" target="_blank" rel="noopener noreferrer" style={authStyles.link}>supabase.com</a> par free project banao, phir SQL Editor me ye query chalao:
+          </div>
+          <pre style={authStyles.sqlBox}>{SETUP_SQL}</pre>
+          <button style={authStyles.smallBtn} onClick={copySql}>{copied ? "Copied ✓" : "SQL Copy karo"}</button>
+        </div>
+
+        <div style={authStyles.stepBlock}>
+          <div style={authStyles.stepTitle}>2. Keys paste karo</div>
+          <div style={authStyles.stepText}>Project Settings → API me se ye do cheezein milengi:</div>
+          <input style={authStyles.input} placeholder="Project URL (https://xxxx.supabase.co)" value={url} onChange={(e) => setUrl(e.target.value)} />
+          <input style={authStyles.input} placeholder="Anon public key" value={anonKey} onChange={(e) => setAnonKey(e.target.value)} />
+        </div>
+
+        {err && <div style={authStyles.error}>{err}</div>}
+        <button style={authStyles.primaryBtn} onClick={submit}>Continue</button>
+        <div style={authStyles.footNote}>Ye keys is browser me hi save hoti hain, kahin bheji nahi jaati.</div>
+      </div>
+    </div>
+  );
+}
+
+function AuthScreen({ client, onAuthed, blockedError }) {
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
+  const [loading, setLoading] = useState(false);
+  const [err, setErr] = useState("");
+
+  const submit = async () => {
+    setErr("");
+    const em = email.trim();
+    if (!em || !password) {
+      setErr("Email aur password dono bharo.");
+      return;
+    }
+    if (password.length < 6) {
+      setErr("Password kam se kam 6 characters ka ho.");
+      return;
+    }
+    setLoading(true);
+    try {
+      const { error } = await client.auth.signInWithPassword({ email: em, password });
+      if (error) {
+        setErr(error.message);
+      } else {
+        onAuthed();
+      }
+    } catch (e) {
+      setErr("Kuch galat ho gaya: " + (e && e.message ? e.message : e));
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  return (
+    <div style={authStyles.wrap}>
+      <div style={authStyles.card}>
+        <div style={authStyles.title}>उपस्थिति रजिस्टर</div>
+        <div style={authStyles.subtitle}>Login karke apna attendance data access karo</div>
+
+        <input style={authStyles.input} type="email" placeholder="Email" value={email} onChange={(e) => setEmail(e.target.value)}
+          onKeyDown={(e) => e.key === "Enter" && submit()} autoCapitalize="off" autoCorrect="off" />
+        <input style={authStyles.input} type="password" placeholder="Password" value={password} onChange={(e) => setPassword(e.target.value)}
+          onKeyDown={(e) => e.key === "Enter" && submit()} />
+
+        {err && <div style={authStyles.error}>{err}</div>}
+        {blockedError && <div style={authStyles.error}>{blockedError}</div>}
+
+        <button style={authStyles.primaryBtn} onClick={submit} disabled={loading}>
+          {loading ? "Please wait…" : "Login"}
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function Root() {
+  const [sbConfig, setSbConfig] = useState(null);
+  const [client, setClient] = useState(null);
+  const [signupClient, setSignupClient] = useState(null);
+  const [session, setSession] = useState(undefined); // undefined = checking, null = logged out
+  const [profile, setProfile] = useState(undefined); // undefined = checking, null = blocked, {role,...} = ok
+  const [authBlockedMsg, setAuthBlockedMsg] = useState("");
+  const [checkingConfig, setCheckingConfig] = useState(true);
+  const [teacherOptions, setTeacherOptions] = useState([]);
+  const [viewAsUserId, setViewAsUserId] = useState(""); // "" = apna data, otherwise a teacher's user id
+
+  useEffect(() => {
+    if (EMBEDDED_SUPABASE_URL && EMBEDDED_SUPABASE_ANON_KEY) {
+      setSbConfig({ url: EMBEDDED_SUPABASE_URL, anonKey: EMBEDDED_SUPABASE_ANON_KEY });
+      setCheckingConfig(false);
+      return;
+    }
+    const u = localStorage.getItem(SB_URL_KEY);
+    const k = localStorage.getItem(SB_ANON_KEY);
+    if (u && k) setSbConfig({ url: u, anonKey: k });
+    setCheckingConfig(false);
+  }, []);
+
+  useEffect(() => {
+    if (!sbConfig) return;
+    try {
+      const c = window.supabase.createClient(sbConfig.url, sbConfig.anonKey);
+      setClient(c);
+      // Separate, non-session-persisting client — purely so the admin can
+      // create a class teacher's login (signUp) without getting signed out
+      // of their own admin session in the process.
+      setSignupClient(
+        window.supabase.createClient(sbConfig.url, sbConfig.anonKey, {
+          auth: { persistSession: false, autoRefreshToken: false },
+        })
+      );
+      c.auth.getSession().then(({ data }) => setSession(data.session || null));
+      const { data: sub } = c.auth.onAuthStateChange((_event, sess) => {
+        setSession(sess || null);
+      });
+      return () => sub && sub.subscription && sub.subscription.unsubscribe();
+    } catch (e) {
+      setSession(null);
+    }
+  }, [sbConfig]);
+
+  // Load the `profiles` row that decides admin vs class-teacher access.
+  // If nobody has a profile yet (brand new project), the very first person
+  // to log in automatically becomes admin — after that, only the admin can
+  // create further (class teacher) logins from inside the app.
+  useEffect(() => {
+    if (!client || !session) {
+      if (session === null) setProfile(null);
+      return;
+    }
+    let cancelled = false;
+    (async () => {
+      setProfile(undefined);
+      const { data: existing, error: existingErr } = await client.from("profiles").select("*").eq("id", session.user.id).maybeSingle();
+      if (cancelled) return;
+      if (existing) {
+        setProfile(existing);
+        return;
+      }
+      if (existingErr) {
+        setAuthBlockedMsg("Profile check me error aayi. [Debug: " + existingErr.message + (existingErr.code ? " (code: " + existingErr.code + ")" : "") + "]");
+        await client.auth.signOut();
+        setProfile(null);
+        setSession(null);
+        return;
+      }
+      // No profile row yet — try to bootstrap as the first admin. This only
+      // succeeds (per RLS) if the profiles table is still completely empty.
+      const { data: inserted, error: insertErr } = await client
+        .from("profiles")
+        .insert({ id: session.user.id, email: session.user.email, role: "admin" })
+        .select()
+        .maybeSingle();
+      if (cancelled) return;
+      if (!insertErr && inserted) {
+        setProfile(inserted);
+        return;
+      }
+      // A row for this id may already exist (e.g. an earlier attempt actually
+      // succeeded but this check missed it) — re-fetch before giving up.
+      if (insertErr && insertErr.code === "23505") {
+        const { data: retryExisting } = await client.from("profiles").select("*").eq("id", session.user.id).maybeSingle();
+        if (cancelled) return;
+        if (retryExisting) {
+          setProfile(retryExisting);
+          return;
+        }
+      }
+      {
+        const detail = insertErr ? (insertErr.message + (insertErr.code ? " (code: " + insertErr.code + ")" : "")) : "Row insert nahi hui.";
+        setAuthBlockedMsg("Ye account admin dwara authorize nahi hai. Apne school admin se apna Class Teacher login banwao. [Debug: " + detail + "]");
+        await client.auth.signOut();
+        setProfile(null);
+        setSession(null);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [client, session]);
+
+  // Agar admin kisi teacher ka access hata de (profiles row delete kar de),
+  // to jo teacher pehle se logged in hai uska session bhi jald khatam ho —
+  // isliye har thodi der me aur tab wapas dekhne par profile dobara verify karo.
+  useEffect(() => {
+    if (!client || !session || !profile) return;
+    const revalidate = async () => {
+      const { data: still, error } = await client.from("profiles").select("*").eq("id", session.user.id).maybeSingle();
+      if (error || !still) {
+        setAuthBlockedMsg("Aapka access admin ne hata diya hai. Apne school admin se sampark karein.");
+        await client.auth.signOut();
+        setProfile(null);
+        setSession(null);
+        setViewAsUserId("");
+      }
+    };
+    const interval = setInterval(revalidate, 20000);
+    const onVisible = () => { if (document.visibilityState === "visible") revalidate(); };
+    document.addEventListener("visibilitychange", onVisible);
+    window.addEventListener("focus", onVisible);
+    return () => {
+      clearInterval(interval);
+      document.removeEventListener("visibilitychange", onVisible);
+      window.removeEventListener("focus", onVisible);
+    };
+  }, [client, session, profile]);
+
+  // Admin ke liye teacher accounts ki list — "kis teacher ka data dekhna/edit
+  // karna hai" dropdown ke liye. Actual access RLS se milta hai (is_admin()),
+  // ye list sirf UI me dikhane ke liye hai.
+  useEffect(() => {
+    if (!client || !profile || profile.role !== "admin") {
+      setTeacherOptions([]);
+      return;
+    }
+    let cancelled = false;
+    client.from("profiles").select("*").eq("role", "teacher").order("created_at", { ascending: false }).then(({ data }) => {
+      if (!cancelled && data) setTeacherOptions(data);
+    });
+    return () => { cancelled = true; };
+  }, [client, profile]);
+
+  const handleLogout = async () => {
+    if (client) await client.auth.signOut();
+    setSession(null);
+    setProfile(null);
+    setViewAsUserId("");
+  };
+
+  if (checkingConfig) return null;
+
+  if (!sbConfig) {
+    return <SetupScreen onDone={(url, anonKey) => setSbConfig({ url, anonKey })} />;
+  }
+
+  if (!client || session === undefined) return null;
+
+  if (!session) {
+    return <AuthScreen client={client} onAuthed={() => setAuthBlockedMsg("")} blockedError={authBlockedMsg} />;
+  }
+
+  if (profile === undefined) return null; // checking profile/role
+
+  if (!profile) {
+    return <AuthScreen client={client} onAuthed={() => setAuthBlockedMsg("")} blockedError={authBlockedMsg} />;
+  }
+
+  const effectiveUserId = (profile.role === "admin" && viewAsUserId) ? viewAsUserId : session.user.id;
+  window.storage = makeSupabaseStorage(client, effectiveUserId);
+
+  const isAdmin = profile.role === "admin";
+  const isTeacher = profile.role === "teacher";
+  const viewingTeacher = isAdmin && viewAsUserId ? teacherOptions.find((t) => t.id === viewAsUserId) : null;
+  const userLabel = viewingTeacher
+    ? `Admin: ${session.user.email}`
+    : isTeacher
+    ? `Class Teacher: ${session.user.email}`
+    : session.user.email;
+
+  return (
+    <AttendanceApp
+      key={effectiveUserId}
+      userEmail={userLabel}
+      isGuest={isTeacher}
+      isAdmin={isAdmin}
+      client={client}
+      signupClient={signupClient}
+      onLogout={handleLogout}
+      teacherOptions={teacherOptions}
+      viewAsUserId={viewAsUserId}
+      onChangeViewAs={setViewAsUserId}
+      viewingTeacherEmail={viewingTeacher ? viewingTeacher.email : null}
+    />
+  );
+}
+
+const authStyles = {
+  wrap: { minHeight: "100vh", background: "#e9e3ce", display: "flex", alignItems: "center", justifyContent: "center", padding: "20px 14px", fontFamily: "'Inter', sans-serif" },
+  card: { width: "100%", maxWidth: 420, background: "#fffdf7", border: "1px solid #e3d9b8", borderRadius: 14, padding: "22px 20px", boxShadow: "0 14px 30px rgba(43,35,24,0.15)" },
+  title: { fontFamily: "'Kalam', cursive", fontWeight: 700, fontSize: 24, color: "#6B4226", textAlign: "center" },
+  subtitle: { fontSize: 12.5, color: "#8a8368", textAlign: "center", marginTop: 4, marginBottom: 18 },
+  tabRow: { display: "flex", gap: 6, marginBottom: 14, background: "#e3d9b8", borderRadius: 9, padding: 3 },
+  tabBtn: { flex: 1, padding: "8px 0", borderRadius: 7, border: "none", background: "transparent", color: "#6B4226", fontFamily: "'Inter', sans-serif", fontWeight: 600, fontSize: 12.5, cursor: "pointer" },
+  tabBtnActive: { background: "#fffdf7", color: "#1F3D2B", boxShadow: "0 1px 3px rgba(0,0,0,0.12)" },
+  input: { width: "100%", border: "1px solid #d8cfae", borderRadius: 8, padding: "10px 11px", fontSize: 14, fontFamily: "'Inter', sans-serif", background: "#fff", color: "#2B2318", outline: "none", marginBottom: 10 },
+  primaryBtn: { width: "100%", background: "#1F3D2B", color: "#F5F3E7", border: "none", borderRadius: 9, padding: "11px 0", fontWeight: 700, fontSize: 14, cursor: "pointer", fontFamily: "'Inter', sans-serif", marginTop: 4 },
+  linkBtn: { width: "100%", background: "transparent", border: "none", color: "#8a8368", fontSize: 11.5, cursor: "pointer", marginTop: 12, textDecoration: "underline", fontFamily: "'Inter', sans-serif" },
+  dividerRow: { display: "flex", alignItems: "center", gap: 10, margin: "16px 0 12px" },
+  dividerLine: { flex: 1, height: 1, background: "#e3d9b8" },
+  dividerText: { fontSize: 11, color: "#b3a889", fontFamily: "'Inter', sans-serif" },
+  guestBox: { background: "#f6f1de", border: "1px solid #e3d9b8", borderRadius: 10, padding: "12px 12px 4px" },
+  guestTitle: { fontSize: 13, fontWeight: 700, color: "#6B4226", marginBottom: 4 },
+  error: { background: "#fdece7", color: "#C1503D", border: "1px solid #f0cfc5", borderRadius: 8, padding: "8px 10px", fontSize: 12, marginBottom: 10 },
+  info: { background: "#eaf3ec", color: "#2f5c3c", border: "1px solid #cfe3d5", borderRadius: 8, padding: "8px 10px", fontSize: 12, marginBottom: 10 },
+  stepBlock: { marginBottom: 16 },
+  stepTitle: { fontSize: 13, fontWeight: 700, color: "#6B4226", marginBottom: 4 },
+  stepText: { fontSize: 12, color: "#8a8368", marginBottom: 8, lineHeight: 1.5 },
+  link: { color: "#4A6FA5", fontWeight: 600 },
+  sqlBox: { background: "#1F1B14", color: "#e8e2cf", fontFamily: "'IBM Plex Mono', monospace", fontSize: 10.5, padding: "10px 12px", borderRadius: 8, overflowX: "auto", whiteSpace: "pre", marginBottom: 8 },
+  smallBtn: { background: "#E8C468", color: "#1F3D2B", border: "none", borderRadius: 7, padding: "6px 12px", fontWeight: 700, fontSize: 11.5, cursor: "pointer", fontFamily: "'Inter', sans-serif" },
+  footNote: { fontSize: 10.5, color: "#b3a889", textAlign: "center", marginTop: 10 },
+};
+
+try {
+  const root = ReactDOM.createRoot(document.getElementById("root"));
+  root.render(<Root />);
+} catch (err) {
+  const box = document.getElementById("boot-error");
+  box.style.display = "block";
+  box.textContent = "App render error: " + (err && err.message ? err.message : err);
+  console.error(err);
+}
+</script>
+<script>
+  if ("serviceWorker" in navigator) {
+    window.addEventListener("load", () => {
+      navigator.serviceWorker.register("service-worker.js").catch((err) => {
+        console.warn("Service worker register failed:", err);
+      });
+    });
+  }
+</script>
+</body>
+</html>
