@@ -181,6 +181,15 @@ const Camera = makeIcon(<>
   <path d="M14.5 4h-5L7 7H4a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2V9a2 2 0 0 0-2-2h-3l-2.5-3z" />
   <circle cx="12" cy="13" r="3" />
 </>);
+const MapPin = makeIcon(<>
+  <path d="M20 10c0 6-8 12-8 12s-8-6-8-12a8 8 0 0 1 16 0z" />
+  <circle cx="12" cy="10" r="3" />
+</>);
+const Link2 = makeIcon(<>
+  <path d="M9 17H7A5 5 0 0 1 7 7h2" />
+  <path d="M15 7h2a5 5 0 1 1 0 10h-2" />
+  <line x1="8" y1="12" x2="16" y2="12" />
+</>);
 
 /* ---------------- app logic (ported from the original .jsx) ---------------- */
 
@@ -202,6 +211,12 @@ const todayISO = () => {
 const currentMonthStr = () => todayISO().slice(0, 7);
 const currentYearStr = () => todayISO().slice(0, 4);
 const newId = (p) => `${p}_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
+const randomCheckinCode = () => {
+  const chars = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"; // no 0/O/1/I confusion
+  let out = "";
+  for (let i = 0; i < 6; i++) out += chars[Math.floor(Math.random() * chars.length)];
+  return out;
+};
 // "08:19 pm" -> "8:19p" — compact form so it fits inside a narrow grid cell without overlapping neighbours
 const shortTime = (t) => (t ? t.replace(/^0/, "").replace(/\s?(am|pm|AM|PM)$/, (m) => m.trim()[0].toLowerCase()) : t);
 const fullTimeNoAmPm = (t) => (t ? t.replace(/\s?(am|pm|AM|PM)$/, "").trim() : t);
@@ -226,16 +241,34 @@ const pruneOldSelfies = (selfies) => {
   return result;
 };
 
-const blankClass = (name = "") => ({ id: newId("c"), className: name, teacher: "", students: [], attendance: {}, holidays: {}, attendanceTimes: {}, attendanceSelfies: {}, lateTime: "" });
+const blankClass = (name = "") => ({ id: newId("c"), className: name, teacher: "", students: [], attendance: {}, holidays: {}, attendanceTimes: {}, attendanceSelfies: {}, lateTime: "", geoCenter: null, geoRadius: 150, checkinCode: "" });
 const normalizeClasses = (list) =>
   (list || []).map((c) => ({
     ...c,
-    students: (c.students || []).map((s) => ({ ...s, active: s.active === false ? false : true })),
+    students: (c.students || []).map((s) => ({ ...s, active: s.active === false ? false : true, pin: s.pin || "" })),
     holidays: c.holidays || {},
     attendanceTimes: c.attendanceTimes || {},
     attendanceSelfies: pruneOldSelfies(c.attendanceSelfies || {}),
     lateTime: c.lateTime || "",
+    geoCenter: c.geoCenter || null,
+    geoRadius: c.geoRadius || 150,
+    checkinCode: c.checkinCode || "",
   }));
+
+// distance (meters) between two lat/lng points
+const distanceMeters = (lat1, lon1, lat2, lon2) => {
+  const R = 6371000;
+  const toRad = (d) => (d * Math.PI) / 180;
+  const dLat = toRad(lat2 - lat1);
+  const dLon = toRad(lon2 - lon1);
+  const a = Math.sin(dLat / 2) ** 2 + Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLon / 2) ** 2;
+  return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+};
+const getCurrentPositionAsync = (opts) =>
+  new Promise((resolve, reject) => {
+    if (!navigator.geolocation) { reject(new Error("Geolocation not supported")); return; }
+    navigator.geolocation.getCurrentPosition(resolve, reject, opts || { enableHighAccuracy: true, timeout: 12000, maximumAge: 0 });
+  });
 
 // "8:15 am" / "08:15 AM" jaise stamped time ko minutes-since-midnight me convert karta hai
 const parseTimeToMinutes = (t) => {
@@ -431,7 +464,52 @@ function SelfieCaptureModal({ studentName, onCapture, onCancel }) {
   );
 }
 
-function AttendanceApp({ userEmail, onLogout, isGuest, isAdmin, client, signupClient, teacherOptions = [], viewAsUserId, onChangeViewAs, viewingTeacherEmail }) {
+/* ---------------- per-student PIN gate (used on the guest/teacher device before marking or removing Present) ---------------- */
+function PinPromptModal({ studentName, expectedPin, mode, onSuccess, onCancel }) {
+  const [pin, setPin] = useState("");
+  const [wrong, setWrong] = useState(false);
+  const inputRef = useRef(null);
+
+  useEffect(() => {
+    inputRef.current && inputRef.current.focus();
+  }, []);
+
+  const submit = () => {
+    if (pin === expectedPin) {
+      onSuccess();
+    } else {
+      setWrong(true);
+      setPin("");
+    }
+  };
+
+  return (
+    <div style={styles.modalOverlay} className="no-print">
+      <div style={styles.pinCard}>
+        <div style={styles.selfieTitle}>🔒 {studentName} ka PIN daalo</div>
+        <div style={styles.selfieSub}>{mode === "remove" ? "Present hataane" : "Present lagane"} ke liye apna 4-digit PIN daalo.</div>
+        <input
+          ref={inputRef}
+          type="password"
+          inputMode="numeric"
+          maxLength={4}
+          value={pin}
+          onChange={(e) => { setWrong(false); setPin(e.target.value.replace(/\D/g, "").slice(0, 4)); }}
+          onKeyDown={(e) => e.key === "Enter" && pin.length === 4 && submit()}
+          style={styles.pinInput}
+          placeholder="••••"
+        />
+        {wrong && <div style={styles.pinWrongMsg}>Galat PIN, dobara koshish karo.</div>}
+        <div style={styles.selfieBtnRow}>
+          <button style={styles.selfieCancelBtn} onClick={onCancel}>Cancel</button>
+          <button style={styles.selfieCaptureBtn} onClick={submit} disabled={pin.length !== 4}>Confirm</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function AttendanceApp({ userEmail, onLogout, isGuest, isAdmin, client, signupClient, teacherOptions = [], viewAsUserId, onChangeViewAs, viewingTeacherEmail, lockedTimeMode }) {
   const [loaded, setLoaded] = useState(false);
   const [classes, setClasses] = useState([]);
   const [activeClassId, setActiveClassId] = useState(null);
@@ -447,7 +525,7 @@ function AttendanceApp({ userEmail, onLogout, isGuest, isAdmin, client, signupCl
 
   const [showTeacherPanel, setShowTeacherPanel] = useState(false);
   const [teacherAccounts, setTeacherAccounts] = useState([]);
-  const [teacherForm, setTeacherForm] = useState({ email: "", password: "" });
+  const [teacherForm, setTeacherForm] = useState({ email: "", password: "", timeMode: false });
   const [teacherPanelError, setTeacherPanelError] = useState("");
   const [teacherSaving, setTeacherSaving] = useState(false);
   const [teacherLastCreated, setTeacherLastCreated] = useState(null);
@@ -459,10 +537,17 @@ function AttendanceApp({ userEmail, onLogout, isGuest, isAdmin, client, signupCl
 
   const [view, setView] = useState("enrollment");
   const [reportScope, setReportScope] = useState("month");
-  const [teacherMode, setTeacherMode] = useState(false);
+  const [teacherMode, setTeacherMode] = useState(isGuest ? !!lockedTimeMode : false);
   const [lateTimeEditing, setLateTimeEditing] = useState(false);
   const [selfieTarget, setSelfieTarget] = useState(null);
   const [viewingSelfie, setViewingSelfie] = useState(null);
+  const [pinTarget, setPinTarget] = useState(null);
+  const [geoRadiusDraft, setGeoRadiusDraft] = useState(150);
+  const [geoSaving, setGeoSaving] = useState(false);
+  const [geoSetupError, setGeoSetupError] = useState("");
+  const [geoCheckingId, setGeoCheckingId] = useState(null);
+  const [geoBlockedFor, setGeoBlockedFor] = useState(null);
+  const [linkCopied, setLinkCopied] = useState(false);
 
   const [newRoll, setNewRoll] = useState("");
   const [newName, setNewName] = useState("");
@@ -470,6 +555,7 @@ function AttendanceApp({ userEmail, onLogout, isGuest, isAdmin, client, signupCl
   const [editingId, setEditingId] = useState(null);
   const [editRoll, setEditRoll] = useState("");
   const [editName, setEditName] = useState("");
+  const [editPin, setEditPin] = useState("");
   const [saveError, setSaveError] = useState(false);
   const [justStamped, setJustStamped] = useState(null);
   const nameInputRef = useRef(null);
@@ -538,6 +624,9 @@ function AttendanceApp({ userEmail, onLogout, isGuest, isAdmin, client, signupCl
   const attendanceTimes = activeClass ? (activeClass.attendanceTimes || {}) : {};
   const attendanceSelfies = activeClass ? (activeClass.attendanceSelfies || {}) : {};
   const lateTime = activeClass ? (activeClass.lateTime || "") : "";
+  const geoCenter = activeClass ? (activeClass.geoCenter || null) : null;
+  const geoRadius = activeClass ? (activeClass.geoRadius || 150) : 150;
+  const checkinCode = activeClass ? (activeClass.checkinCode || "") : "";
   const classInfo = { className: activeClass ? activeClass.className : "", teacher: activeClass ? activeClass.teacher : "" };
 
   const matchesSearch = (s, q) => !q.trim() || s.name.toLowerCase().includes(q.trim().toLowerCase()) || String(s.roll).toLowerCase().includes(q.trim().toLowerCase());
@@ -558,6 +647,9 @@ function AttendanceApp({ userEmail, onLogout, isGuest, isAdmin, client, signupCl
   const setAttendanceSelfies = (updater) =>
     updateActive((c) => ({ attendanceSelfies: typeof updater === "function" ? updater(c.attendanceSelfies || {}) : updater }));
   const setLateTime = (val) => updateActive(() => ({ lateTime: val }));
+  const setGeoCenter = (val) => updateActive(() => ({ geoCenter: val }));
+  const setGeoRadius = (val) => updateActive(() => ({ geoRadius: val }));
+  const setCheckinCode = (val) => updateActive(() => ({ checkinCode: val }));
   const toggleHoliday = (dateStr, label) => {
     setHolidays((prev) => {
       const next = { ...prev };
@@ -697,15 +789,22 @@ function AttendanceApp({ userEmail, onLogout, isGuest, isAdmin, client, signupCl
       return;
     }
     const { error: profileError } = await client.from("profiles").insert({
-      id: signUpData.user.id, email, role: "teacher",
+      id: signUpData.user.id, email, role: "teacher", time_mode: teacherForm.timeMode,
     });
     if (profileError) {
       setTeacherPanelError("Account ban gaya lekin profile save nahi hui — Supabase me 'profiles' table check karein.");
     } else {
       setTeacherLastCreated({ email, password: pwd });
-      setTeacherForm({ email: "", password: "" });
+      setTeacherForm({ email: "", password: "", timeMode: false });
       await loadTeacherAccounts();
     }
+    setTeacherSaving(false);
+  };
+
+  const toggleAccountTimeMode = async (id, next) => {
+    setTeacherSaving(true);
+    const { error } = await client.from("profiles").update({ time_mode: next }).eq("id", id);
+    if (!error) await loadTeacherAccounts();
     setTeacherSaving(false);
   };
 
@@ -801,15 +900,41 @@ function AttendanceApp({ userEmail, onLogout, isGuest, isAdmin, client, signupCl
     setEditingId(s.id);
     setEditRoll(s.roll);
     setEditName(s.name);
+    setEditPin(s.pin || "");
   };
 
   const saveEdit = (id) => {
+    const cleanPin = editPin.replace(/\D/g, "").slice(0, 4);
     setStudents((prev) =>
       prev
-        .map((s) => (s.id === id ? { ...s, roll: editRoll.trim() || s.roll, name: editName.trim() || s.name } : s))
+        .map((s) => (s.id === id ? { ...s, roll: editRoll.trim() || s.roll, name: editName.trim() || s.name, pin: isAdmin ? cleanPin : s.pin } : s))
         .sort((a, b) => a.roll.localeCompare(b.roll, undefined, { numeric: true }))
     );
     setEditingId(null);
+  };
+
+  const copyCheckinLink = async () => {
+    const url = `${window.location.origin}${window.location.pathname}?checkin=${checkinCode}`;
+    try {
+      await navigator.clipboard.writeText(url);
+      setLinkCopied(true);
+      setTimeout(() => setLinkCopied(false), 2000);
+    } catch (e) {
+      window.prompt("Link copy karo:", url);
+    }
+  };
+
+  const captureGeoCenter = async () => {
+    setGeoSaving(true);
+    setGeoSetupError("");
+    try {
+      const pos = await getCurrentPositionAsync();
+      setGeoCenter({ lat: pos.coords.latitude, lng: pos.coords.longitude });
+      setGeoRadius(Number(geoRadiusDraft) || 150);
+    } catch (err) {
+      setGeoSetupError("Location nahi mil paayi — GPS/location permission on karke phir try karo.");
+    }
+    setGeoSaving(false);
   };
 
   const markStatus = (studentId, status) => {
@@ -1134,6 +1259,10 @@ function AttendanceApp({ userEmail, onLogout, isGuest, isAdmin, client, signupCl
             <input style={styles.chalkInput} placeholder="At least 6 characters" value={teacherForm.password}
               onChange={(e) => setTeacherForm((p) => ({ ...p, password: e.target.value }))} />
           </div>
+          <label style={styles.timeModeCheckboxRow}>
+            <input type="checkbox" checked={teacherForm.timeMode} onChange={(e) => setTeacherForm((p) => ({ ...p, timeMode: e.target.checked }))} />
+            Ye login <b>Time Mode</b> register use karega (OFF = Normal register)
+          </label>
           {teacherPanelError && <div style={authStyles.error}>{teacherPanelError}</div>}
           <button style={styles.teacherPanelBtn} onClick={createTeacherAccount} disabled={teacherSaving}>
             {teacherSaving ? "Please wait…" : "Create Login"}
@@ -1145,7 +1274,18 @@ function AttendanceApp({ userEmail, onLogout, isGuest, isAdmin, client, signupCl
             ) : (
               teacherAccounts.map((t) => (
                 <div key={t.id} style={styles.teacherRow}>
-                  <span>{t.email}</span>
+                  <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                    <span>{t.email}</span>
+                    <label style={styles.timeModeMiniToggle}>
+                      <input
+                        type="checkbox"
+                        checked={!!t.time_mode}
+                        disabled={teacherSaving}
+                        onChange={(e) => toggleAccountTimeMode(t.id, e.target.checked)}
+                      />
+                      {t.time_mode ? "Time Mode (ON)" : "Normal register"}
+                    </label>
+                  </div>
                   <button style={styles.teacherRemoveBtn} onClick={() => deleteTeacherAccount(t.id)} disabled={teacherSaving}>
                     Remove Access
                   </button>
@@ -1312,6 +1452,18 @@ function AttendanceApp({ userEmail, onLogout, isGuest, isAdmin, client, signupCl
                         <>
                           <input style={{ ...styles.textInput, width: 50, padding: "5px 6px" }} value={editRoll} onChange={(e) => setEditRoll(e.target.value)} />
                           <input style={{ ...styles.textInput, flex: 1, padding: "5px 6px" }} value={editName} onChange={(e) => setEditName(e.target.value)} onKeyDown={(e) => e.key === "Enter" && saveEdit(s.id)} />
+                          {isAdmin && teacherMode && (
+                            <input
+                              type="password"
+                              inputMode="numeric"
+                              maxLength={4}
+                              placeholder="PIN"
+                              style={{ ...styles.textInput, width: 56, padding: "5px 6px", textAlign: "center", letterSpacing: 3 }}
+                              value={editPin}
+                              onChange={(e) => setEditPin(e.target.value.replace(/\D/g, "").slice(0, 4))}
+                              onKeyDown={(e) => e.key === "Enter" && saveEdit(s.id)}
+                            />
+                          )}
                           <button style={styles.deleteBtn} onClick={() => saveEdit(s.id)} aria-label="Save"><Check size={16} color="#4C8C5B" /></button>
                         </>
                       ) : (
@@ -1326,6 +1478,9 @@ function AttendanceApp({ userEmail, onLogout, isGuest, isAdmin, client, signupCl
                               <div style={styles.enrolledDate}>
                                 Enrolled: {new Date(s.enrolledAt + "T00:00:00").toLocaleDateString("en-IN", { day: "numeric", month: "short", year: "numeric" })}
                               </div>
+                            )}
+                            {isAdmin && teacherMode && (
+                              <div style={styles.pinStatusTag}>{s.pin ? "🔒 PIN set" : "🔓 PIN nahi set hai"}</div>
                             )}
                           </div>
                           {isAdmin ? (
@@ -1378,12 +1533,18 @@ function AttendanceApp({ userEmail, onLogout, isGuest, isAdmin, client, signupCl
               </div>
 
               <div style={{ marginBottom: 10 }} className="no-print">
-                <button
-                  style={{ ...styles.teacherModeBtn, ...(teacherMode ? styles.teacherModeBtnActive : {}) }}
-                  onClick={() => setTeacherMode((v) => !v)}
-                >
-                  ⏱️ Time Mode {teacherMode ? "ON" : "OFF"}
-                </button>
+                {isGuest ? (
+                  <div style={{ ...styles.teacherModeBtn, ...(teacherMode ? styles.teacherModeBtnActive : {}), cursor: "default", textAlign: "center" }}>
+                    ⏱️ Time Mode {teacherMode ? "ON" : "OFF"} <span style={{ fontWeight: 400, opacity: 0.85 }}>(Admin ne set kiya hai)</span>
+                  </div>
+                ) : (
+                  <button
+                    style={{ ...styles.teacherModeBtn, ...(teacherMode ? styles.teacherModeBtnActive : {}) }}
+                    onClick={() => setTeacherMode((v) => !v)}
+                  >
+                    ⏱️ Time Mode {teacherMode ? "ON" : "OFF"}
+                  </button>
+                )}
                 {teacherMode && (
                   <>
                     <div style={styles.teacherModeHint}>Present dabate hi naam ke niche time print hoga, aur ek selfie proof photo li jaayegi.</div>
@@ -1417,6 +1578,51 @@ function AttendanceApp({ userEmail, onLogout, isGuest, isAdmin, client, signupCl
                           </button>
                         )}
                       </div>
+                    )}
+
+                    {isAdmin && (
+                      geoCenter ? (
+                        <div style={styles.lateTimeSavedRow}>
+                          <span style={styles.lateTimeLabel}>📍 Geo-circle set hai (radius {geoRadius}m)</span>
+                          <button style={styles.lateTimeEditLink} onClick={() => { setGeoRadiusDraft(geoRadius); setGeoCenter(null); }}>Badlo</button>
+                        </div>
+                      ) : (
+                        <div style={styles.lateTimeRow}>
+                          <span style={styles.lateTimeLabel}>📍 Yahan ko present-marking area banao:</span>
+                          <input
+                            type="number"
+                            min="20"
+                            style={{ ...styles.lateTimeInput, width: 60 }}
+                            value={geoRadiusDraft}
+                            onChange={(e) => setGeoRadiusDraft(e.target.value)}
+                          />
+                          <span style={{ ...styles.lateTimeLabel, fontWeight: 400 }}>m radius</span>
+                          <button style={styles.lateTimeSaveBtn} onClick={captureGeoCenter} disabled={geoSaving} aria-label="Yahan ko center set karo">
+                            {geoSaving ? "…" : <MapPin size={13} />}
+                          </button>
+                        </div>
+                      )
+                    )}
+                    {isAdmin && geoSetupError && <div style={styles.pinWrongMsg}>{geoSetupError}</div>}
+                    {isAdmin && geoCenter && (
+                      <div style={{ ...styles.teacherModeHint, marginTop: 2, fontSize: 10 }}>(Custodian ko sirf is area ke andar hi Present dabane diya jaayega — usko center/radius nahi dikhega.)</div>
+                    )}
+
+                    {isAdmin && (
+                      checkinCode ? (
+                        <div style={styles.lateTimeSavedRow}>
+                          <span style={styles.lateTimeLabel}>🔗 Self-attendance link ON (code: {checkinCode})</span>
+                          <button style={styles.lateTimeEditLink} onClick={copyCheckinLink}>{linkCopied ? "Copied!" : "Copy link"}</button>
+                          <button style={styles.lateTimeClearBtn} onClick={() => setCheckinCode("")} aria-label="Link band karo"><X size={12} /></button>
+                        </div>
+                      ) : (
+                        <div style={styles.lateTimeRow}>
+                          <span style={styles.lateTimeLabel}>🔗 Candidates khud apni attendance laga sakein:</span>
+                          <button style={styles.lateTimeSaveBtn} onClick={() => setCheckinCode(randomCheckinCode())} aria-label="Link banao">
+                            <Link2 size={13} style={{ marginRight: 4, verticalAlign: -2 }} />Link banao
+                          </button>
+                        </div>
+                      )
                     )}
                   </>
                 )}
@@ -1519,6 +1725,9 @@ function AttendanceApp({ userEmail, onLogout, isGuest, isAdmin, client, signupCl
                               <img src={attendanceSelfies[selectedDate][s.id]} alt="Selfie proof" style={styles.studentSelfieThumb} />
                             </button>
                           )}
+                          {geoBlockedFor === s.id && (
+                            <div style={styles.studentTimeTagLate}>📍 School area ke bahar ho — Present nahi ho paaya</div>
+                          )}
                         </div>
                         <div style={styles.statusGroup}>
                           {["P", "A"].map((code) => {
@@ -1528,16 +1737,39 @@ function AttendanceApp({ userEmail, onLogout, isGuest, isAdmin, client, signupCl
                               <button
                                 key={code}
                                 className={anim ? "stamp-pop chalk-btn" : "chalk-btn"}
-                                onClick={() => {
+                                disabled={geoCheckingId === s.id}
+                                onClick={async () => {
+                                  if (code === "P" && teacherMode && isGuest && geoCenter && st !== "P") {
+                                    setGeoCheckingId(s.id);
+                                    try {
+                                      const pos = await getCurrentPositionAsync();
+                                      const dist = distanceMeters(pos.coords.latitude, pos.coords.longitude, geoCenter.lat, geoCenter.lng);
+                                      setGeoCheckingId(null);
+                                      if (dist > geoRadius) {
+                                        setGeoBlockedFor(s.id);
+                                        setTimeout(() => setGeoBlockedFor(null), 3500);
+                                        return;
+                                      }
+                                    } catch (err) {
+                                      setGeoCheckingId(null);
+                                      setGeoBlockedFor(s.id);
+                                      setTimeout(() => setGeoBlockedFor(null), 3500);
+                                      return;
+                                    }
+                                  }
+                                  if (code === "P" && teacherMode && isGuest && s.pin) {
+                                    setPinTarget({ student: s, turningOn: st !== "P" });
+                                    return;
+                                  }
                                   if (code === "P" && teacherMode && st !== "P") {
                                     setSelfieTarget(s);
                                   } else {
                                     markStatus(s.id, code);
                                   }
                                 }}
-                                style={{ ...styles.statusBtn, borderColor: STATUS[code].color, background: active ? STATUS[code].color : "transparent", color: active ? "#fdfaf0" : STATUS[code].color }}
+                                style={{ ...styles.statusBtn, borderColor: STATUS[code].color, background: active ? STATUS[code].color : "transparent", color: active ? "#fdfaf0" : STATUS[code].color, opacity: geoCheckingId === s.id ? 0.6 : 1 }}
                                 aria-label={STATUS[code].label} title={STATUS[code].label}>
-                                {STATUS[code].short}
+                                {geoCheckingId === s.id && code === "P" ? "…" : STATUS[code].short}
                               </button>
                             );
                           })}
@@ -2063,6 +2295,24 @@ function AttendanceApp({ userEmail, onLogout, isGuest, isAdmin, client, signupCl
           </div>
         </div>
       )}
+
+      {pinTarget && (
+        <PinPromptModal
+          studentName={pinTarget.student.name}
+          expectedPin={pinTarget.student.pin}
+          mode={pinTarget.turningOn ? "mark" : "remove"}
+          onSuccess={() => {
+            const { student, turningOn } = pinTarget;
+            setPinTarget(null);
+            if (turningOn) {
+              setSelfieTarget(student);
+            } else {
+              markStatus(student.id, "P");
+            }
+          }}
+          onCancel={() => setPinTarget(null)}
+        />
+      )}
     </div>
   );
 }
@@ -2077,6 +2327,8 @@ const styles = {
   teacherPanelWrap: { width: "100%", maxWidth: 480, background: "#fffdf7", border: "1px solid #e3d9b8", borderRadius: 10, padding: 12, marginBottom: 10 },
   teacherPanelTitle: { fontSize: 13, fontWeight: 700, color: "#6B4226", marginBottom: 4 },
   teacherFormRow: { display: "flex", gap: 8, flexWrap: "wrap" },
+  timeModeCheckboxRow: { display: "flex", alignItems: "center", gap: 7, fontSize: 12, color: "#6B4226", fontFamily: "'Inter', sans-serif", marginTop: 8, cursor: "pointer" },
+  timeModeMiniToggle: { display: "flex", alignItems: "center", gap: 6, fontSize: 10.5, color: "#8a8368", fontFamily: "'Inter', sans-serif", cursor: "pointer" },
   teacherCreatedBox: { background: "#eaf3ec", border: "1px solid #cfe3d5", borderRadius: 8, padding: "8px 10px", fontSize: 12.5, color: "#2f5c3c", marginBottom: 10 },
   teacherRow: { display: "flex", alignItems: "center", justifyContent: "space-between", padding: "6px 0", borderBottom: "1px solid #ece3c4", fontSize: 12.5, color: "#6B4226", fontFamily: "'IBM Plex Mono', monospace" },
   teacherRemoveBtn: { background: "transparent", border: "1px solid #C1503D", borderRadius: 6, padding: "4px 9px", fontSize: 11, color: "#C1503D", cursor: "pointer", fontFamily: "'Inter', sans-serif" },
@@ -2142,6 +2394,7 @@ const styles = {
   studentNameLineWrap: { whiteSpace: "normal", overflowWrap: "anywhere", wordBreak: "break-word", lineHeight: 1.3 },
   inactiveTag: { marginLeft: 8, fontSize: 9.5, fontWeight: 700, color: "#8a8368", background: "#e3d9b8", padding: "2px 6px", borderRadius: 5, verticalAlign: "middle" },
   enrolledDate: { fontSize: 10.5, color: "#a89b78", fontFamily: "'IBM Plex Mono', monospace", marginTop: 1 },
+  pinStatusTag: { fontSize: 10.5, color: "#8a5a1c", fontFamily: "'Inter', sans-serif", marginTop: 2, fontWeight: 600 },
   studentTimeTag: { fontSize: 10.5, color: "#4C8C5B", fontFamily: "'IBM Plex Mono', monospace", marginTop: 2, fontWeight: 700 },
   studentTimeTagLate: { fontSize: 10.5, color: "#C1503D", fontFamily: "'IBM Plex Mono', monospace", marginTop: 2, fontWeight: 700 },
   studentSelfieThumb: { width: 20, height: 20, borderRadius: "50%", objectFit: "cover", border: "1.5px solid #E8C468", display: "block" },
@@ -2163,6 +2416,9 @@ const styles = {
   selfieBtnRow: { display: "flex", gap: 8, marginTop: 14 },
   selfieCancelBtn: { flex: "0 0 auto", background: "transparent", border: "1.5px solid #d8cfae", color: "#8a8368", borderRadius: 9, padding: "10px 14px", fontFamily: "'Inter', sans-serif", fontWeight: 700, fontSize: 12.5, cursor: "pointer" },
   selfieCaptureBtn: { flex: 1, background: "#4C8C5B", border: "none", color: "#fdfaf0", borderRadius: 9, padding: "10px 14px", fontFamily: "'Inter', sans-serif", fontWeight: 700, fontSize: 12.5, cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center" },
+  pinCard: { background: "#FFFDF7", borderRadius: 14, padding: "18px 18px 16px", width: "100%", maxWidth: 300, boxShadow: "0 10px 30px rgba(0,0,0,0.35)" },
+  pinInput: { width: "100%", boxSizing: "border-box", textAlign: "center", fontSize: 26, letterSpacing: 14, padding: "10px 8px 10px 22px", border: "1.5px solid #d8cfae", borderRadius: 9, fontFamily: "'IBM Plex Mono', monospace", color: "#2B2318", outline: "none", marginTop: 6 },
+  pinWrongMsg: { color: "#C1503D", fontSize: 11.5, fontFamily: "'Inter', sans-serif", textAlign: "center", marginTop: 6, fontWeight: 600 },
   teacherModeBtn: { width: "100%", background: "#fdf3de", border: "1.5px dashed #8a5a1c", borderRadius: 8, padding: "9px 10px", fontFamily: "'Inter', sans-serif", fontWeight: 700, fontSize: 12.5, color: "#8a5a1c", cursor: "pointer" },
   teacherModeBtnActive: { background: "#4C8C5B", border: "1.5px solid #4C8C5B", color: "#fdfaf0" },
   teacherModeHint: { fontSize: 11, color: "#8a8368", fontFamily: "'Inter', sans-serif", marginTop: 5, textAlign: "center" },
@@ -2333,6 +2589,102 @@ function AuthScreen({ client, onAuthed, blockedError }) {
         <button style={authStyles.primaryBtn} onClick={submit} disabled={loading}>
           {loading ? "Please wait…" : "Login"}
         </button>
+
+        <a href="?checkin=" style={authStyles.checkinLink}>🎓 Candidate ho? Yahan apni attendance lagao</a>
+      </div>
+    </div>
+  );
+}
+
+function SelfCheckinScreen({ client }) {
+  const initialCode = (new URLSearchParams(window.location.search).get("checkin") || "").trim().toUpperCase();
+  const [code, setCode] = useState(initialCode);
+  const [name, setName] = useState("");
+  const [pin, setPin] = useState("");
+  const [stage, setStage] = useState(initialCode ? "form" : "code"); // code | form | success | error
+  const [message, setMessage] = useState("");
+  const [busy, setBusy] = useState(false);
+
+  const goBack = () => { window.location.href = window.location.pathname; };
+
+  const submitCode = () => {
+    const clean = code.trim().toUpperCase();
+    if (!clean) return;
+    setCode(clean);
+    setStage("form");
+  };
+
+  const submitAttendance = async () => {
+    if (!name.trim() || pin.length !== 4) return;
+    setBusy(true);
+    setMessage("");
+    try {
+      const dateStr = todayISO();
+      const timeStr = new Date().toLocaleTimeString("en-IN", { hour: "2-digit", minute: "2-digit", hour12: true });
+      const { data, error } = await client.rpc("self_checkin", {
+        p_code: code, p_name: name.trim(), p_pin: pin, p_date: dateStr, p_time: timeStr,
+      });
+      if (error) {
+        setMessage("Kuch gadbad ho gayi — dobara try karo. [" + error.message + "]");
+        setStage("error");
+      } else if (data && data.success) {
+        setMessage(`${data.name} ki attendance lag gayi ✅`);
+        setStage("success");
+      } else {
+        setMessage((data && data.message) || "Naam ya PIN match nahi hua.");
+        setStage("error");
+      }
+    } catch (e) {
+      setMessage("Kuch galat ho gaya: " + (e && e.message ? e.message : e));
+      setStage("error");
+    }
+    setBusy(false);
+  };
+
+  return (
+    <div style={authStyles.wrap}>
+      <div style={authStyles.card}>
+        <div style={authStyles.title}>🎓 Apni Attendance</div>
+        <div style={authStyles.subtitle}>
+          {stage === "code" && "Class ka code daalo (jo aapke custodian ne diya hai)."}
+          {stage === "form" && "Apna poora naam aur 4-digit PIN daalo."}
+          {stage === "success" && "Ho gaya!"}
+          {stage === "error" && "Nahi ho paaya."}
+        </div>
+
+        {stage === "code" && (
+          <>
+            <input style={{ ...authStyles.input, textAlign: "center", letterSpacing: 3, textTransform: "uppercase" }} placeholder="CODE"
+              value={code} onChange={(e) => setCode(e.target.value.toUpperCase())} onKeyDown={(e) => e.key === "Enter" && submitCode()} />
+            <button style={authStyles.primaryBtn} onClick={submitCode} disabled={!code.trim()}>Aage badho</button>
+          </>
+        )}
+
+        {stage === "form" && (
+          <>
+            <input style={authStyles.input} placeholder="Apna poora naam" value={name}
+              onChange={(e) => setName(e.target.value)} onKeyDown={(e) => e.key === "Enter" && pin.length === 4 && submitAttendance()} autoFocus />
+            <input style={{ ...authStyles.input, textAlign: "center", letterSpacing: 8 }} type="password" inputMode="numeric" maxLength={4}
+              placeholder="PIN" value={pin} onChange={(e) => setPin(e.target.value.replace(/\D/g, "").slice(0, 4))}
+              onKeyDown={(e) => e.key === "Enter" && submitAttendance()} />
+            {message && <div style={authStyles.error}>{message}</div>}
+            <button style={authStyles.primaryBtn} onClick={submitAttendance} disabled={busy || !name.trim() || pin.length !== 4}>
+              {busy ? "Please wait…" : "Present maaro"}
+            </button>
+          </>
+        )}
+
+        {stage === "success" && (
+          <div style={authStyles.checkinSuccessBox}>✅ {message}</div>
+        )}
+        {stage === "error" && (
+          <>
+            <div style={authStyles.error}>{message}</div>
+            <button style={authStyles.primaryBtn} onClick={() => setStage("form")}>Dobara try karo</button>
+          </>
+        )}
+
+        <a href="#" onClick={(e) => { e.preventDefault(); goBack(); }} style={authStyles.checkinLink}>← Wapas login par jao</a>
       </div>
     </div>
   );
@@ -2532,6 +2884,10 @@ function Root() {
 
   if (!client || session === undefined) return null;
 
+  if (new URLSearchParams(window.location.search).has("checkin")) {
+    return <SelfCheckinScreen client={client} />;
+  }
+
   if (!session) {
     return <AuthScreen client={client} onAuthed={() => setAuthBlockedMsg("")} blockedError={authBlockedMsg} />;
   }
@@ -2553,6 +2909,7 @@ function Root() {
     : isTeacher
     ? `Entities Custodian: ${session.user.email}`
     : session.user.email;
+  const lockedTimeMode = viewingTeacher ? !!viewingTeacher.time_mode : (isTeacher ? !!profile.time_mode : null);
 
   return (
     <AttendanceApp
@@ -2567,6 +2924,7 @@ function Root() {
       viewAsUserId={viewAsUserId}
       onChangeViewAs={setViewAsUserId}
       viewingTeacherEmail={viewingTeacher ? viewingTeacher.email : null}
+      lockedTimeMode={lockedTimeMode}
     />
   );
 }
@@ -2589,6 +2947,8 @@ const authStyles = {
   guestTitle: { fontSize: 13, fontWeight: 700, color: "#6B4226", marginBottom: 4 },
   error: { background: "#fdece7", color: "#C1503D", border: "1px solid #f0cfc5", borderRadius: 8, padding: "8px 10px", fontSize: 12, marginBottom: 10 },
   info: { background: "#eaf3ec", color: "#2f5c3c", border: "1px solid #cfe3d5", borderRadius: 8, padding: "8px 10px", fontSize: 12, marginBottom: 10 },
+  checkinLink: { display: "block", textAlign: "center", marginTop: 16, fontSize: 12.5, color: "#4A6FA5", fontFamily: "'Inter', sans-serif", textDecoration: "underline" },
+  checkinSuccessBox: { background: "#eaf3ec", color: "#2f5c3c", border: "1px solid #cfe3d5", borderRadius: 10, padding: "16px 14px", fontSize: 14, fontWeight: 700, textAlign: "center", marginBottom: 10 },
   stepBlock: { marginBottom: 16 },
   stepTitle: { fontSize: 13, fontWeight: 700, color: "#6B4226", marginBottom: 4 },
   stepText: { fontSize: 12, color: "#8a8368", marginBottom: 8, lineHeight: 1.5 },
