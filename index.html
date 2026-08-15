@@ -465,10 +465,11 @@ function SelfieCaptureModal({ studentName, onCapture, onCancel }) {
 }
 
 /* ---------------- per-student PIN gate (used on the guest/teacher device before marking or removing Present) ---------------- */
-function PinPromptModal({ studentName, expectedPin, mode, onSuccess, onCancel }) {
+function PinPromptModal({ studentName, expectedPin, mode, isAdminPin, onSuccess, onCancel }) {
   const [pin, setPin] = useState("");
   const [wrong, setWrong] = useState(false);
   const inputRef = useRef(null);
+  const maxLen = isAdminPin ? 6 : 4;
 
   useEffect(() => {
     inputRef.current && inputRef.current.focus();
@@ -486,23 +487,25 @@ function PinPromptModal({ studentName, expectedPin, mode, onSuccess, onCancel })
   return (
     <div style={styles.modalOverlay} className="no-print">
       <div style={styles.pinCard}>
-        <div style={styles.selfieTitle}>🔒 {studentName} ka PIN daalo</div>
-        <div style={styles.selfieSub}>{mode === "remove" ? "Present hataane" : "Present lagane"} ke liye apna 4-digit PIN daalo.</div>
+        <div style={styles.selfieTitle}>🔒 {isAdminPin ? "Admin PIN daalo" : `${studentName} ka PIN daalo`}</div>
+        <div style={styles.selfieSub}>
+          {mode === "remove" ? "Present hataane" : "Present lagane"} ke liye {isAdminPin ? "Admin ka" : "apna"} {maxLen}-digit PIN daalo.
+        </div>
         <input
           ref={inputRef}
           type="password"
           inputMode="numeric"
-          maxLength={4}
+          maxLength={maxLen}
           value={pin}
-          onChange={(e) => { setWrong(false); setPin(e.target.value.replace(/\D/g, "").slice(0, 4)); }}
-          onKeyDown={(e) => e.key === "Enter" && pin.length === 4 && submit()}
+          onChange={(e) => { setWrong(false); setPin(e.target.value.replace(/\D/g, "").slice(0, maxLen)); }}
+          onKeyDown={(e) => e.key === "Enter" && pin.length >= 4 && submit()}
           style={styles.pinInput}
           placeholder="••••"
         />
         {wrong && <div style={styles.pinWrongMsg}>Galat PIN, dobara koshish karo.</div>}
         <div style={styles.selfieBtnRow}>
           <button style={styles.selfieCancelBtn} onClick={onCancel}>Cancel</button>
-          <button style={styles.selfieCaptureBtn} onClick={submit} disabled={pin.length !== 4}>Confirm</button>
+          <button style={styles.selfieCaptureBtn} onClick={submit} disabled={pin.length < 4}>Confirm</button>
         </div>
       </div>
     </div>
@@ -537,7 +540,7 @@ function AttendanceApp({ userEmail, onLogout, isGuest, isAdmin, client, signupCl
 
   const [view, setView] = useState("enrollment");
   const [reportScope, setReportScope] = useState("month");
-  const [teacherMode, setTeacherMode] = useState(isGuest ? !!lockedTimeMode : false);
+  const [teacherMode, setTeacherMode] = useState((isGuest || viewingTeacherEmail) ? !!lockedTimeMode : false);
   const [lateTimeEditing, setLateTimeEditing] = useState(false);
   const [selfieTarget, setSelfieTarget] = useState(null);
   const [viewingSelfie, setViewingSelfie] = useState(null);
@@ -1533,9 +1536,9 @@ function AttendanceApp({ userEmail, onLogout, isGuest, isAdmin, client, signupCl
               </div>
 
               <div style={{ marginBottom: 10 }} className="no-print">
-                {isGuest ? (
+                {(isGuest || viewingTeacherEmail) ? (
                   <div style={{ ...styles.teacherModeBtn, ...(teacherMode ? styles.teacherModeBtnActive : {}), cursor: "default", textAlign: "center" }}>
-                    ⏱️ Time Mode {teacherMode ? "ON" : "OFF"} <span style={{ fontWeight: 400, opacity: 0.85 }}>(Admin ne set kiya hai)</span>
+                    ⏱️ Time Mode {teacherMode ? "ON" : "OFF"} <span style={{ fontWeight: 400, opacity: 0.85 }}>{isGuest ? "(Admin ne set kiya hai)" : "(Is custodian ke login se set hai)"}</span>
                   </div>
                 ) : (
                   <button
@@ -1757,8 +1760,13 @@ function AttendanceApp({ userEmail, onLogout, isGuest, isAdmin, client, signupCl
                                       return;
                                     }
                                   }
+                                  // Already Present in Time Mode: leaving Present (toggling P off, or marking A) always needs PIN — admin aur custodian dono ke liye, jab tak PIN sahi na ho tab tak Present nahi hatega/Absent nahi lagega.
+                                  if (teacherMode && st === "P") {
+                                    setPinTarget({ student: s, turningOn: false, nextCode: code });
+                                    return;
+                                  }
                                   if (code === "P" && teacherMode && isGuest && s.pin) {
-                                    setPinTarget({ student: s, turningOn: st !== "P" });
+                                    setPinTarget({ student: s, turningOn: true, nextCode: "P" });
                                     return;
                                   }
                                   if (code === "P" && teacherMode && st !== "P") {
@@ -2299,15 +2307,16 @@ function AttendanceApp({ userEmail, onLogout, isGuest, isAdmin, client, signupCl
       {pinTarget && (
         <PinPromptModal
           studentName={pinTarget.student.name}
-          expectedPin={pinTarget.student.pin}
+          expectedPin={pinTarget.student.pin || (localStorage.getItem(DELETE_PIN_KEY) || DEFAULT_DELETE_PIN)}
+          isAdminPin={!pinTarget.student.pin}
           mode={pinTarget.turningOn ? "mark" : "remove"}
           onSuccess={() => {
-            const { student, turningOn } = pinTarget;
+            const { student, turningOn, nextCode } = pinTarget;
             setPinTarget(null);
             if (turningOn) {
               setSelfieTarget(student);
             } else {
-              markStatus(student.id, "P");
+              markStatus(student.id, nextCode || "P");
             }
           }}
           onCancel={() => setPinTarget(null)}
