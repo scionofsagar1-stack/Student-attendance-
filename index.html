@@ -95,7 +95,7 @@
   };
 </script>
 
-<script type="text/babel">
+<script type="text/plain" id="app-source">
 const { useState, useEffect, useRef, useMemo } = React;
 
 // Class delete ke liye Admin PIN (device-level). Admin isko header se badal sakta hai.
@@ -175,6 +175,12 @@ const Power = makeIcon(<>
   <path d="M12 2v10" />
   <path d="M18.4 6.6a9 9 0 1 1-12.77.04" />
 </>);
+const Star = makeIcon(<path d="M11.525 2.295a.53.53 0 0 1 .95 0l2.31 4.679a2.123 2.123 0 0 0 1.595 1.16l5.166.756a.53.53 0 0 1 .294.904l-3.736 3.638a2.123 2.123 0 0 0-.611 1.878l.882 5.14a.53.53 0 0 1-.771.56l-4.618-2.428a2.122 2.122 0 0 0-1.973 0L6.396 21.01a.53.53 0 0 1-.77-.56l.881-5.139a2.122 2.122 0 0 0-.611-1.879L2.16 9.795a.53.53 0 0 1 .294-.906l5.165-.755a2.122 2.122 0 0 0 1.597-1.16z" />);
+const SearchIcon = makeIcon(<><circle cx="11" cy="11" r="8" /><path d="m21 21-4.3-4.3" /></>);
+const Camera = makeIcon(<>
+  <path d="M14.5 4h-5L7 7H4a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2V9a2 2 0 0 0-2-2h-3l-2.5-3z" />
+  <circle cx="12" cy="13" r="3" />
+</>);
 
 /* ---------------- app logic (ported from the original .jsx) ---------------- */
 
@@ -183,6 +189,9 @@ const FONT_IMPORT = `@import url('https://fonts.googleapis.com/css2?family=Kalam
 const STORAGE_KEY = "attendance-app-store-v2";
 
 const MONTH_NAMES = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+// Indian school academic year: April se March tak. Har number asli calendar
+// month hai (1=Jan ... 12=Dec); April-Dec selectedYear ke, Jan-Mar agle saal ke.
+const ACADEMIC_MONTH_ORDER = [4, 5, 6, 7, 8, 9, 10, 11, 12, 1, 2, 3];
 
 const todayISO = () => {
   const d = new Date();
@@ -193,6 +202,9 @@ const todayISO = () => {
 const currentMonthStr = () => todayISO().slice(0, 7);
 const currentYearStr = () => todayISO().slice(0, 4);
 const newId = (p) => `${p}_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
+// "08:19 pm" -> "8:19p" — compact form so it fits inside a narrow grid cell without overlapping neighbours
+const shortTime = (t) => (t ? t.replace(/^0/, "").replace(/\s?(am|pm|AM|PM)$/, (m) => m.trim()[0].toLowerCase()) : t);
+const fullTimeNoAmPm = (t) => (t ? t.replace(/\s?(am|pm|AM|PM)$/, "").trim() : t);
 
 const STATUS = {
   P: { label: "Present", short: "P", color: "#4C8C5B" },
@@ -200,12 +212,224 @@ const STATUS = {
   L: { label: "Leave", short: "L", color: "#4A6FA5" },
 };
 
-const blankClass = (name = "") => ({ id: newId("c"), className: name, teacher: "", students: [], attendance: {} });
+const SELFIE_RETENTION_DAYS = 45;
+// 45 din se purani selfies auto-delete kar deta hai (storage bloat rokne ke liye)
+const pruneOldSelfies = (selfies) => {
+  if (!selfies) return {};
+  const cutoff = new Date();
+  cutoff.setDate(cutoff.getDate() - SELFIE_RETENTION_DAYS);
+  const cutoffStr = cutoff.toISOString().slice(0, 10);
+  const result = {};
+  Object.keys(selfies).forEach((dateStr) => {
+    if (dateStr >= cutoffStr) result[dateStr] = selfies[dateStr];
+  });
+  return result;
+};
+
+const blankClass = (name = "") => ({ id: newId("c"), className: name, teacher: "", students: [], attendance: {}, holidays: {}, attendanceTimes: {}, attendanceSelfies: {}, lateTime: "" });
 const normalizeClasses = (list) =>
   (list || []).map((c) => ({
     ...c,
     students: (c.students || []).map((s) => ({ ...s, active: s.active === false ? false : true })),
+    holidays: c.holidays || {},
+    attendanceTimes: c.attendanceTimes || {},
+    attendanceSelfies: pruneOldSelfies(c.attendanceSelfies || {}),
+    lateTime: c.lateTime || "",
   }));
+
+// "8:15 am" / "08:15 AM" jaise stamped time ko minutes-since-midnight me convert karta hai
+const parseTimeToMinutes = (t) => {
+  if (!t) return null;
+  const m = String(t).trim().match(/^(\d{1,2}):(\d{2})\s*([ap]m)?$/i);
+  if (!m) return null;
+  let h = parseInt(m[1], 10);
+  const min = parseInt(m[2], 10);
+  const ap = m[3] ? m[3].toLowerCase() : null;
+  if (ap === "pm" && h !== 12) h += 12;
+  if (ap === "am" && h === 12) h = 0;
+  return h * 60 + min;
+};
+// lateTime "HH:MM" (24hr, <input type="time"> se) ke against stamped time check karta hai
+const isLateStamp = (stampedTime, lateTimeStr) => {
+  if (!lateTimeStr || !stampedTime) return false;
+  const lm = String(lateTimeStr).trim().match(/^(\d{1,2}):(\d{2})$/);
+  if (!lm) return false;
+  const lateMinutes = parseInt(lm[1], 10) * 60 + parseInt(lm[2], 10);
+  const stampMinutes = parseTimeToMinutes(stampedTime);
+  return stampMinutes !== null && stampMinutes > lateMinutes;
+};
+
+/* ---------------- searchable student picker (replaces plain <select> where lists can get long) ---------------- */
+function StudentSearchSelect({ students, value, onChange, placeholder = "Koi candidate nahi", style }) {
+  const [open, setOpen] = useState(false);
+  const [q, setQ] = useState("");
+  const wrapRef = useRef(null);
+  const inputRef = useRef(null);
+
+  useEffect(() => {
+    if (!open) return;
+    const onDocClick = (e) => {
+      if (wrapRef.current && !wrapRef.current.contains(e.target)) setOpen(false);
+    };
+    document.addEventListener("mousedown", onDocClick);
+    document.addEventListener("touchstart", onDocClick);
+    return () => {
+      document.removeEventListener("mousedown", onDocClick);
+      document.removeEventListener("touchstart", onDocClick);
+    };
+  }, [open]);
+
+  useEffect(() => {
+    if (open) {
+      setQ("");
+      setTimeout(() => inputRef.current && inputRef.current.focus(), 30);
+    }
+  }, [open]);
+
+  const selected = students.find((s) => s.id === value);
+  const filtered = students.filter((s) => {
+    const t = q.trim().toLowerCase();
+    return !t || s.name.toLowerCase().includes(t) || String(s.roll).toLowerCase().includes(t);
+  });
+
+  return (
+    <div ref={wrapRef} style={{ position: "relative", flex: 1, minWidth: 0, ...style }}>
+      <button
+        type="button"
+        style={styles.selectInput}
+        onClick={() => setOpen((v) => !v)}
+      >
+        <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+          {selected ? `${selected.roll} — ${selected.name}` : (students.length === 0 ? placeholder : "Candidate chuno")}
+        </span>
+        <ChevronRight size={14} style={{ transform: "rotate(90deg)", flexShrink: 0, marginLeft: 6 }} />
+      </button>
+
+      {open && (
+        <div style={styles.dropdownPanel}>
+          <div style={{ ...styles.searchRow, marginBottom: 0, borderRadius: 0, border: "none", borderBottom: "1px solid #d8cfae" }}>
+            <SearchIcon size={15} color="#b3a889" style={{ flexShrink: 0 }} />
+            <input
+              ref={inputRef}
+              style={styles.searchInput}
+              placeholder="Naam ya roll se search karo…"
+              value={q}
+              onChange={(e) => setQ(e.target.value)}
+            />
+            {q && (
+              <button style={styles.searchClearBtn} onClick={() => setQ("")} aria-label="Clear search"><X size={14} /></button>
+            )}
+          </div>
+          <div style={styles.dropdownList}>
+            {filtered.length === 0 ? (
+              <div style={{ ...styles.empty, padding: "14px 12px" }}>"{q}" se koi candidate nahi mila.</div>
+            ) : (
+              filtered.map((s) => (
+                <div
+                  key={s.id}
+                  style={{ ...styles.dropdownOption, ...(s.id === value ? styles.dropdownOptionActive : {}) }}
+                  onClick={() => { onChange(s.id); setOpen(false); }}
+                >
+                  {s.roll} — {s.name}
+                </div>
+              ))
+            )}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+/* ---------------- simple camera selfie capture (proof photo, no liveness claim) ---------------- */
+function SelfieCaptureModal({ studentName, onCapture, onCancel }) {
+  const videoRef = useRef(null);
+  const streamRef = useRef(null);
+  const [status, setStatus] = useState("starting"); // starting | ready | error
+  const [errMsg, setErrMsg] = useState("");
+
+  useEffect(() => {
+    let cancelled = false;
+    navigator.mediaDevices
+      ?.getUserMedia({ video: { facingMode: "user" }, audio: false })
+      .then((stream) => {
+        if (cancelled) {
+          stream.getTracks().forEach((t) => t.stop());
+          return;
+        }
+        streamRef.current = stream;
+        if (videoRef.current) {
+          videoRef.current.srcObject = stream;
+          videoRef.current.play().catch(() => {});
+        }
+        setStatus("ready");
+      })
+      .catch((err) => {
+        if (cancelled) return;
+        setStatus("error");
+        setErrMsg(err && err.message ? err.message : "Camera access nahi mil paaya.");
+      });
+    return () => {
+      cancelled = true;
+      if (streamRef.current) streamRef.current.getTracks().forEach((t) => t.stop());
+    };
+  }, []);
+
+  const stopStream = () => {
+    if (streamRef.current) streamRef.current.getTracks().forEach((t) => t.stop());
+  };
+
+  const capture = () => {
+    const video = videoRef.current;
+    if (!video || !video.videoWidth) return;
+    const canvas = document.createElement("canvas");
+    const size = 240;
+    canvas.width = size;
+    canvas.height = size;
+    const ctx = canvas.getContext("2d");
+    const vw = video.videoWidth, vh = video.videoHeight;
+    const side = Math.min(vw, vh);
+    ctx.save();
+    ctx.translate(size, 0);
+    ctx.scale(-1, 1); // mirror, feels natural for a front camera
+    ctx.drawImage(video, (vw - side) / 2, (vh - side) / 2, side, side, 0, 0, size, size);
+    ctx.restore();
+    const dataUrl = canvas.toDataURL("image/jpeg", 0.55);
+    stopStream();
+    onCapture(dataUrl);
+  };
+
+  const cancel = () => {
+    stopStream();
+    onCancel();
+  };
+
+  return (
+    <div style={styles.modalOverlay} className="no-print">
+      <div style={styles.selfieCard}>
+        <div style={styles.selfieTitle}>📸 {studentName} ki selfie proof</div>
+        <div style={styles.selfieSub}>Present dabate hi ek photo save hogi (proof ke liye — ye liveness-verified nahi hai).</div>
+        <div style={styles.selfieFrame}>
+          {status === "error" ? (
+            <div style={styles.selfieErrorBox}>
+              Camera nahi khul paaya.<br />
+              <span style={{ fontSize: 10.5, opacity: 0.8 }}>{errMsg}</span>
+            </div>
+          ) : (
+            <video ref={videoRef} playsInline muted style={{ ...styles.selfieVideo, transform: "scaleX(-1)" }} />
+          )}
+          {status === "starting" && <div style={styles.selfieLoadingTag}>Camera khul raha hai…</div>}
+        </div>
+        <div style={styles.selfieBtnRow}>
+          <button style={styles.selfieCancelBtn} onClick={cancel}>Cancel</button>
+          <button style={styles.selfieCaptureBtn} onClick={capture} disabled={status !== "ready"}>
+            <Camera size={15} style={{ marginRight: 6, verticalAlign: -3 }} />Capture &amp; Present maaro
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
 
 function AttendanceApp({ userEmail, onLogout, isGuest, isAdmin, client, signupClient, teacherOptions = [], viewAsUserId, onChangeViewAs, viewingTeacherEmail }) {
   const [loaded, setLoaded] = useState(false);
@@ -213,6 +437,13 @@ function AttendanceApp({ userEmail, onLogout, isGuest, isAdmin, client, signupCl
   const [activeClassId, setActiveClassId] = useState(null);
   const [showNewClassForm, setShowNewClassForm] = useState(false);
   const [newClassName, setNewClassName] = useState("");
+  const [editingClassField, setEditingClassField] = useState(null); // null | "className" | "teacher"
+  const [classFieldDraft, setClassFieldDraft] = useState("");
+  const [enrollSearch, setEnrollSearch] = useState("");
+  const [registerSearch, setRegisterSearch] = useState("");
+  const [showHolidayForm, setShowHolidayForm] = useState(false);
+  const [holidayDraft, setHolidayDraft] = useState("");
+  const [gridSearch, setGridSearch] = useState("");
 
   const [showTeacherPanel, setShowTeacherPanel] = useState(false);
   const [teacherAccounts, setTeacherAccounts] = useState([]);
@@ -228,6 +459,9 @@ function AttendanceApp({ userEmail, onLogout, isGuest, isAdmin, client, signupCl
 
   const [view, setView] = useState("enrollment");
   const [reportScope, setReportScope] = useState("month");
+  const [teacherMode, setTeacherMode] = useState(false);
+  const [lateTimeEditing, setLateTimeEditing] = useState(false);
+  const [selfieTarget, setSelfieTarget] = useState(null);
 
   const [newRoll, setNewRoll] = useState("");
   const [newName, setNewName] = useState("");
@@ -299,7 +533,15 @@ function AttendanceApp({ userEmail, onLogout, isGuest, isAdmin, client, signupCl
   const students = activeClass ? activeClass.students : [];
   const activeStudents = students.filter((s) => s.active !== false);
   const attendance = activeClass ? activeClass.attendance : {};
+  const holidays = activeClass ? (activeClass.holidays || {}) : {};
+  const attendanceTimes = activeClass ? (activeClass.attendanceTimes || {}) : {};
+  const attendanceSelfies = activeClass ? (activeClass.attendanceSelfies || {}) : {};
+  const lateTime = activeClass ? (activeClass.lateTime || "") : "";
   const classInfo = { className: activeClass ? activeClass.className : "", teacher: activeClass ? activeClass.teacher : "" };
+
+  const matchesSearch = (s, q) => !q.trim() || s.name.toLowerCase().includes(q.trim().toLowerCase()) || String(s.roll).toLowerCase().includes(q.trim().toLowerCase());
+  const enrollListShown = students.filter((s) => matchesSearch(s, enrollSearch));
+  const registerListShown = activeStudents.filter((s) => matchesSearch(s, registerSearch));
 
   const updateActive = (patchFn) => {
     setClasses((prev) => prev.map((c) => (c.id === activeClassId ? { ...c, ...patchFn(c) } : c)));
@@ -308,12 +550,62 @@ function AttendanceApp({ userEmail, onLogout, isGuest, isAdmin, client, signupCl
     updateActive((c) => ({ students: typeof updater === "function" ? updater(c.students) : updater }));
   const setAttendance = (updater) =>
     updateActive((c) => ({ attendance: typeof updater === "function" ? updater(c.attendance) : updater }));
+  const setHolidays = (updater) =>
+    updateActive((c) => ({ holidays: typeof updater === "function" ? updater(c.holidays || {}) : updater }));
+  const setAttendanceTimes = (updater) =>
+    updateActive((c) => ({ attendanceTimes: typeof updater === "function" ? updater(c.attendanceTimes || {}) : updater }));
+  const setAttendanceSelfies = (updater) =>
+    updateActive((c) => ({ attendanceSelfies: typeof updater === "function" ? updater(c.attendanceSelfies || {}) : updater }));
+  const setLateTime = (val) => updateActive(() => ({ lateTime: val }));
+  const toggleHoliday = (dateStr, label) => {
+    setHolidays((prev) => {
+      const next = { ...prev };
+      if (next[dateStr]) {
+        delete next[dateStr];
+      } else {
+        next[dateStr] = label && label.trim() ? label.trim() : "Chutti";
+      }
+      return next;
+    });
+  };
   const setClassInfo = (updater) =>
     updateActive((c) => {
       const cur = { className: c.className, teacher: c.teacher };
       const next = typeof updater === "function" ? updater(cur) : updater;
       return { className: next.className, teacher: next.teacher };
     });
+
+  const startEditClassField = (field) => {
+    setClassFieldDraft(classInfo[field] || "");
+    setEditingClassField(field);
+  };
+  const saveClassField = () => {
+    if (!editingClassField) return;
+    const field = editingClassField;
+    setClassInfo((p) => ({ ...p, [field]: classFieldDraft.trim() }));
+    setEditingClassField(null);
+    setClassFieldDraft("");
+  };
+  const cancelEditClassField = () => {
+    setEditingClassField(null);
+    setClassFieldDraft("");
+  };
+
+  useEffect(() => {
+    setEditingClassField(null);
+    setClassFieldDraft("");
+    setEnrollSearch("");
+    setRegisterSearch("");
+    setGridSearch("");
+    setShowHolidayForm(false);
+    setHolidayDraft("");
+    setLateTimeEditing(false);
+  }, [activeClassId]);
+
+  useEffect(() => {
+    setShowHolidayForm(false);
+    setHolidayDraft("");
+  }, [selectedDate]);
 
   useEffect(() => {
     if (!selectedStudentId && students.length) setSelectedStudentId(students[0].id);
@@ -324,7 +616,7 @@ function AttendanceApp({ userEmail, onLogout, isGuest, isAdmin, client, signupCl
 
   const addClass = () => {
     const name = newClassName.trim();
-    const c = blankClass(name || `Class ${classes.length + 1}`);
+    const c = blankClass(name || `Entities ${classes.length + 1}`);
     setClasses((prev) => [...prev, c]);
     setActiveClassId(c.id);
     setNewClassName("");
@@ -335,13 +627,13 @@ function AttendanceApp({ userEmail, onLogout, isGuest, isAdmin, client, signupCl
   const deleteClass = () => {
     if (!activeClass || !isAdmin) return;
     const storedPin = localStorage.getItem(DELETE_PIN_KEY) || DEFAULT_DELETE_PIN;
-    const entered = window.prompt("Class delete karne ke liye Admin PIN daalo:");
+    const entered = window.prompt("Entities delete karne ke liye Admin PIN daalo:");
     if (entered === null) return; // cancelled
     if (entered.trim() !== storedPin) {
-      window.alert("Galat PIN. Class delete nahi hui.");
+      window.alert("Galat PIN. Entities delete nahi hui.");
       return;
     }
-    const ok = window.confirm(`"${activeClass.className || "Untitled Class"}" delete karein? Iska poora data (students + attendance) mit jaayega.`);
+    const ok = window.confirm(`"${activeClass.className || "Untitled Entities"}" delete karein? Iska poora data (candidates + attendance) mit jaayega.`);
     if (!ok) return;
     setClasses((prev) => {
       const remaining = prev.filter((c) => c.id !== activeClassId);
@@ -417,7 +709,7 @@ function AttendanceApp({ userEmail, onLogout, isGuest, isAdmin, client, signupCl
   };
 
   const deleteTeacherAccount = async (id) => {
-    const ok = window.confirm("Is class teacher ka access hataayein? (Login abhi bhi Supabase me rahega, lekin ab kuch access nahi milega.)");
+    const ok = window.confirm("Is entities custodian ka access hataayein? (Login abhi bhi Supabase me rahega, lekin ab kuch access nahi milega.)");
     if (!ok) return;
     setTeacherSaving(true);
     const { error } = await client.from("profiles").delete().eq("id", id);
@@ -475,10 +767,10 @@ function AttendanceApp({ userEmail, onLogout, isGuest, isAdmin, client, signupCl
   const removeStudent = (id, name) => {
     if (!isAdmin) return;
     const storedPin = localStorage.getItem(DELETE_PIN_KEY) || DEFAULT_DELETE_PIN;
-    const entered = window.prompt(`"${name || "Student"}" ko delete karne ke liye Admin PIN daalo:`);
+    const entered = window.prompt(`"${name || "Candidate"}" ko delete karne ke liye Admin PIN daalo:`);
     if (entered === null) return; // cancelled
     if (entered.trim() !== storedPin) {
-      window.alert("Galat PIN. Student delete nahi hua.");
+      window.alert("Galat PIN. Candidate delete nahi hua.");
       return;
     }
     setStudents((prev) => prev.filter((s) => s.id !== id));
@@ -499,6 +791,11 @@ function AttendanceApp({ userEmail, onLogout, isGuest, isAdmin, client, signupCl
     setStudents((prev) => prev.map((s) => (s.id === id ? { ...s, active: s.active === false ? true : false } : s)));
   };
 
+  const toggleStar = (id) => {
+    if (!isAdmin) return;
+    setStudents((prev) => prev.map((s) => (s.id === id ? { ...s, starred: !s.starred } : s)));
+  };
+
   const startEdit = (s) => {
     setEditingId(s.id);
     setEditRoll(s.roll);
@@ -515,12 +812,25 @@ function AttendanceApp({ userEmail, onLogout, isGuest, isAdmin, client, signupCl
   };
 
   const markStatus = (studentId, status) => {
+    const wasStatus = (attendance[selectedDate] || {})[studentId];
+    const willBeSet = wasStatus !== status; // false = user is clearing this status
     setAttendance((prev) => {
       const day = { ...(prev[selectedDate] || {}) };
       day[studentId] = day[studentId] === status ? undefined : status;
       if (day[studentId] === undefined) delete day[studentId];
       return { ...prev, [selectedDate]: day };
     });
+    if (teacherMode) {
+      setAttendanceTimes((prev) => {
+        const day = { ...(prev[selectedDate] || {}) };
+        if (status === "P" && willBeSet) {
+          day[studentId] = new Date().toLocaleTimeString("en-IN", { hour: "2-digit", minute: "2-digit", hour12: true });
+        } else {
+          delete day[studentId];
+        }
+        return { ...prev, [selectedDate]: day };
+      });
+    }
     setJustStamped(studentId + status);
     setTimeout(() => setJustStamped(null), 380);
   };
@@ -551,6 +861,20 @@ function AttendanceApp({ userEmail, onLogout, isGuest, isAdmin, client, signupCl
       });
       return { ...prev, [selectedDate]: nextDay };
     });
+    if (teacherMode) {
+      const stamp = new Date().toLocaleTimeString("en-IN", { hour: "2-digit", minute: "2-digit", hour12: true });
+      setAttendanceTimes((prev) => {
+        const nextDay = { ...(prev[selectedDate] || {}) };
+        activeStudents.forEach((s) => {
+          if (allPresent) {
+            delete nextDay[s.id];
+          } else {
+            nextDay[s.id] = stamp;
+          }
+        });
+        return { ...prev, [selectedDate]: nextDay };
+      });
+    }
   };
 
 
@@ -597,6 +921,19 @@ function AttendanceApp({ userEmail, onLogout, isGuest, isAdmin, client, signupCl
   const datesWithData = (prefix) =>
     Object.keys(attendance).filter((d) => d.startsWith(prefix) && Object.keys(attendance[d] || {}).length > 0);
 
+  // Academic year = April(selectedYear) se March(selectedYear+1) tak.
+  const datesInAcademicYear = (startYearStr) => {
+    const y = parseInt(startYearStr, 10);
+    const startDate = `${y}-04-01`;
+    const endDate = `${y + 1}-03-31`;
+    return Object.keys(attendance).filter((d) => d >= startDate && d <= endDate && Object.keys(attendance[d] || {}).length > 0);
+  };
+  const academicYearLabel = (startYearStr) => {
+    const y = parseInt(startYearStr, 10);
+    if (Number.isNaN(y)) return startYearStr;
+    return `${y}-${String((y + 1) % 100).padStart(2, "0")}`;
+  };
+
   const barColor = (p) => (p === null ? "#B8AF98" : p >= 75 ? "#4C8C5B" : p >= 50 ? "#D9A441" : "#C1503D");
   const printReport = () => window.print();
 
@@ -607,7 +944,7 @@ function AttendanceApp({ userEmail, onLogout, isGuest, isAdmin, client, signupCl
     return w.length ? Math.round(w.reduce((a, s) => a + s.percent, 0) / w.length) : null;
   })();
 
-  const yearDates = datesWithData(selectedYear);
+  const yearDates = datesInAcademicYear(selectedYear);
   const yearlyStats = students.map((s) => ({ ...s, ...statsForDates(s.id, yearDates) }));
   const yearClassAvg = (() => {
     const w = yearlyStats.filter((s) => s.percent !== null);
@@ -617,10 +954,12 @@ function AttendanceApp({ userEmail, onLogout, isGuest, isAdmin, client, signupCl
   const selectedStudent = students.find((s) => s.id === selectedStudentId);
   const studentMonthRows = useMemo(() => {
     if (!selectedStudentId) return [];
-    return MONTH_NAMES.map((name, idx) => {
-      const prefix = `${selectedYear}-${String(idx + 1).padStart(2, "0")}`;
+    const startYear = parseInt(selectedYear, 10);
+    return ACADEMIC_MONTH_ORDER.map((m) => {
+      const yr = m <= 3 ? startYear + 1 : startYear;
+      const prefix = `${yr}-${String(m).padStart(2, "0")}`;
       const dates = datesWithData(prefix);
-      return { month: name, ...statsForDates(selectedStudentId, dates) };
+      return { month: MONTH_NAMES[m - 1], ...statsForDates(selectedStudentId, dates) };
     });
   }, [selectedStudentId, selectedYear, attendance]); // eslint-disable-line
 
@@ -639,15 +978,23 @@ function AttendanceApp({ userEmail, onLogout, isGuest, isAdmin, client, signupCl
     return students.map((s) => {
       const days = [];
       let totalPresent = 0;
+      let absentCount = 0;
+      let lateCount = 0;
       for (let d = 1; d <= daysInSelectedMonth; d++) {
         const dateStr = `${selectedMonth}-${String(d).padStart(2, "0")}`;
         const st = attendance[dateStr] && attendance[dateStr][s.id];
-        if (st === "P") totalPresent++;
+        if (st === "P") {
+          totalPresent++;
+          const stampedTime = attendanceTimes[dateStr] && attendanceTimes[dateStr][s.id];
+          if (isLateStamp(stampedTime, lateTime)) lateCount++;
+        } else if (st === "A") {
+          absentCount++;
+        }
         days.push(st || null);
       }
-      return { ...s, days, totalPresent };
+      return { ...s, days, totalPresent, absentCount, lateCount };
     });
-  }, [students, selectedMonth, daysInSelectedMonth, attendance]);
+  }, [students, selectedMonth, daysInSelectedMonth, attendance, attendanceTimes, lateTime]);
 
   const studentDayList = useMemo(() => {
     if (!selectedStudentId) return [];
@@ -657,10 +1004,18 @@ function AttendanceApp({ userEmail, onLogout, isGuest, isAdmin, client, signupCl
       const dateStr = `${selectedMonth}-${String(d).padStart(2, "0")}`;
       const dObj = new Date(y, m - 1, d);
       const st = attendance[dateStr] && attendance[dateStr][selectedStudentId];
-      rows.push({ date: dateStr, day: d, weekday: WEEKDAY_SHORT[dObj.getDay()], status: st || null });
+      const stampedTime = st === "P" ? (attendanceTimes[dateStr] && attendanceTimes[dateStr][selectedStudentId]) || null : null;
+      rows.push({
+        date: dateStr,
+        day: d,
+        weekday: WEEKDAY_SHORT[dObj.getDay()],
+        status: st || null,
+        time: stampedTime,
+        late: stampedTime ? isLateStamp(stampedTime, lateTime) : false,
+      });
     }
     return rows;
-  }, [selectedStudentId, selectedMonth, daysInSelectedMonth, attendance]); // eslint-disable-line
+  }, [selectedStudentId, selectedMonth, daysInSelectedMonth, attendance, attendanceTimes, lateTime]); // eslint-disable-line
 
   const studentAbsentDates = useMemo(() => {
     if (!selectedStudentId) return [];
@@ -684,7 +1039,7 @@ function AttendanceApp({ userEmail, onLogout, isGuest, isAdmin, client, signupCl
         .chalk-btn:active { transform: translateY(1px); }
         @media (prefers-reduced-motion: reduce) { .stamp-pop { animation: none; } }
         @media print {
-          @page { margin: 10mm; size: landscape; }
+          @page { margin: 8mm; size: landscape; }
           .no-print { display: none !important; }
           body { background: #fff !important; }
           .print-only { display: block !important; }
@@ -694,15 +1049,25 @@ function AttendanceApp({ userEmail, onLogout, isGuest, isAdmin, client, signupCl
           .print-table { overflow: visible !important; max-width: none !important; }
           .grid-name-col { position: static !important; }
           .grid-print-table { width: 100% !important; table-layout: fixed !important; }
-          .grid-print-table th, .grid-print-table td { font-size: 7.5px !important; padding: 2px 1px !important; min-width: 0 !important; }
-          .grid-print-table th:nth-child(1), .grid-print-table td:nth-child(1) { width: 22px !important; }
+          .grid-print-table th, .grid-print-table td { font-size: 8.5px !important; padding: 3px 1px !important; min-width: 0 !important; }
+          .grid-print-table th:nth-child(1), .grid-print-table td:nth-child(1) { width: 4% !important; }
           .grid-print-table th:nth-child(2), .grid-print-table td:nth-child(2) {
-            width: 60px !important;
-            max-width: 60px !important;
+            width: 15% !important;
+            max-width: 15% !important;
             overflow: hidden !important;
             text-overflow: ellipsis !important;
             white-space: nowrap !important;
           }
+          .grid-print-table th:last-child, .grid-print-table td:last-child { width: 6% !important; }
+          .grid-print-table th.grid-date-col, .grid-print-table td.grid-date-col, .grid-print-table .grid-holiday-col {
+            width: calc(75% / var(--daycols, 30)) !important;
+            min-width: 0 !important;
+            max-width: none !important;
+            padding: 3px 0px !important;
+            overflow: hidden !important;
+          }
+          .grid-print-table td.grid-date-col > div:first-child { font-size: 9px !important; }
+          .grid-print-table td.grid-date-col > div:last-child { font-size: 6px !important; overflow: hidden !important; }
         }
         .print-only { display: none; }
       `}</style>
@@ -711,12 +1076,12 @@ function AttendanceApp({ userEmail, onLogout, isGuest, isAdmin, client, signupCl
         <div style={styles.accountBar} className="no-print">
           <span style={styles.accountEmail}>
             {userEmail}
-            {isGuest && <span style={styles.guestTag}>CLASS TEACHER</span>}
+            {isGuest && <span style={styles.guestTag}>ENTITIES CUSTODIAN</span>}
           </span>
           <div style={{ display: "flex", gap: 6, flexShrink: 0 }}>
             {isAdmin && (
               <button style={styles.teacherPanelBtn} onClick={() => setShowTeacherPanel((v) => !v)}>
-                Class Teacher Logins
+                Entities Custodian Logins
               </button>
             )}
             <button style={styles.logoutBtn} onClick={onLogout}>Logout</button>
@@ -743,15 +1108,15 @@ function AttendanceApp({ userEmail, onLogout, isGuest, isAdmin, client, signupCl
 
       {isAdmin && viewingTeacherEmail && (
         <div style={styles.viewingBanner} className="no-print">
-          Admin Mode — <b>{viewingTeacherEmail}</b> ki class dekh/edit kar rahe ho.
+          Admin Mode — <b>{viewingTeacherEmail}</b> ki entities dekh/edit kar rahe ho.
         </div>
       )}
 
       {isAdmin && showTeacherPanel && (
         <div style={styles.teacherPanelWrap} className="no-print">
-          <div style={styles.teacherPanelTitle}>Class Teacher Logins</div>
+          <div style={styles.teacherPanelTitle}>Entities Custodian Logins</div>
           <div style={authStyles.stepText}>
-            Yahan se har class teacher ke liye ek login (email + password) banao. Wo isi se login karke apni khud ki class(es)/sections bana sakta hai, aur sirf apni banayi class ka hi data dekh/edit kar sakta hai.
+            Yahan se har entities custodian ke liye ek login (email + password) banao. Wo isi se login karke apni khud ki entities/sections bana sakta hai, aur sirf apni banayi entities ka hi data dekh/edit kar sakta hai.
           </div>
 
           {teacherLastCreated && (
@@ -763,7 +1128,7 @@ function AttendanceApp({ userEmail, onLogout, isGuest, isAdmin, client, signupCl
           )}
 
           <div style={styles.teacherFormRow}>
-            <input style={styles.chalkInput} type="email" placeholder="teacher@example.com" value={teacherForm.email}
+            <input style={styles.chalkInput} type="email" placeholder="custodian@example.com" value={teacherForm.email}
               onChange={(e) => setTeacherForm((p) => ({ ...p, email: e.target.value }))} />
             <input style={styles.chalkInput} placeholder="At least 6 characters" value={teacherForm.password}
               onChange={(e) => setTeacherForm((p) => ({ ...p, password: e.target.value }))} />
@@ -775,7 +1140,7 @@ function AttendanceApp({ userEmail, onLogout, isGuest, isAdmin, client, signupCl
 
           <div style={{ marginTop: 12 }}>
             {teacherAccounts.length === 0 ? (
-              <div style={authStyles.stepText}>Abhi tak koi class teacher login nahi bana.</div>
+              <div style={authStyles.stepText}>Abhi tak koi entities custodian login nahi bana.</div>
             ) : (
               teacherAccounts.map((t) => (
                 <div key={t.id} style={styles.teacherRow}>
@@ -795,7 +1160,7 @@ function AttendanceApp({ userEmail, onLogout, isGuest, isAdmin, client, signupCl
           <div style={styles.boardTexture} />
           <div style={{ position: "relative", zIndex: 1 }}>
             <div style={styles.chalkTitle}>उपस्थिति रजिस्टर</div>
-            <div style={styles.chalkSub}>Student Attendance Register</div>
+            <div style={styles.chalkSub}>Candidate Attendance Register</div>
 
             <div style={styles.classSwitchRow}>
               <Layers size={15} color="#E8C468" style={{ flexShrink: 0 }} />
@@ -806,15 +1171,15 @@ function AttendanceApp({ userEmail, onLogout, isGuest, isAdmin, client, signupCl
               >
                 {classes.map((c) => (
                   <option key={c.id} value={c.id} style={{ color: "#000" }}>
-                    {c.className || "Untitled Class"} ({c.students.length})
+                    {c.className || "Untitled Entities"} ({c.students.length})
                   </option>
                 ))}
               </select>
-              <button style={styles.classIconBtn} onClick={() => setShowNewClassForm((v) => !v)} aria-label="Add class">
+              <button style={styles.classIconBtn} onClick={() => setShowNewClassForm((v) => !v)} aria-label="Add entities">
                 <Plus size={16} />
               </button>
               {isAdmin && (
-                <button style={styles.classIconBtn} onClick={deleteClass} aria-label="Delete class">
+                <button style={styles.classIconBtn} onClick={deleteClass} aria-label="Delete entities">
                   <Trash2 size={15} />
                 </button>
               )}
@@ -824,22 +1189,63 @@ function AttendanceApp({ userEmail, onLogout, isGuest, isAdmin, client, signupCl
               <div style={styles.newClassRow}>
                 <input
                   style={styles.chalkInput}
-                  placeholder="Nayi class ka naam (e.g. Class 6-A)"
+                  placeholder="Nayi entities ka naam (e.g. Entities 6-A)"
                   value={newClassName}
                   onChange={(e) => setNewClassName(e.target.value)}
                   onKeyDown={(e) => e.key === "Enter" && addClass()}
                   autoFocus
                 />
-                <button style={styles.classIconBtn} onClick={addClass} aria-label="Confirm add class"><Check size={16} /></button>
+                <button style={styles.classIconBtn} onClick={addClass} aria-label="Confirm add entities"><Check size={16} /></button>
                 <button style={styles.classIconBtn} onClick={() => { setShowNewClassForm(false); setNewClassName(""); }} aria-label="Cancel"><X size={15} /></button>
               </div>
             )}
 
-            <div style={styles.classRow}>
-              <input style={styles.chalkInput} placeholder="Class / Section" value={classInfo.className}
-                onChange={(e) => setClassInfo((p) => ({ ...p, className: e.target.value }))} />
-              <input style={styles.chalkInput} placeholder="Teacher name" value={classInfo.teacher}
-                onChange={(e) => setClassInfo((p) => ({ ...p, teacher: e.target.value }))} />
+            <div style={styles.classFieldsWrap}>
+              <div style={styles.classFieldBlock}>
+                <div style={styles.classFieldLabel}>Entities / Section</div>
+                {editingClassField === "className" ? (
+                  <div style={styles.classFieldEditRow}>
+                    <input
+                      style={styles.chalkInput}
+                      placeholder="Entities / Section"
+                      value={classFieldDraft}
+                      onChange={(e) => setClassFieldDraft(e.target.value)}
+                      onKeyDown={(e) => e.key === "Enter" && saveClassField()}
+                      autoFocus
+                    />
+                    <button style={styles.classIconBtn} onClick={saveClassField} aria-label="Save entities name"><Check size={15} /></button>
+                    <button style={styles.classIconBtn} onClick={cancelEditClassField} aria-label="Cancel"><X size={14} /></button>
+                  </div>
+                ) : (
+                  <div style={styles.classFieldViewRow}>
+                    <div style={styles.classFieldValue}>{classInfo.className || "Set nahi hai"}</div>
+                    <button style={styles.classFieldEditBtn} onClick={() => startEditClassField("className")} aria-label="Edit entities / section"><Pencil size={13} /></button>
+                  </div>
+                )}
+              </div>
+
+              <div style={styles.classFieldBlock}>
+                <div style={styles.classFieldLabel}>Custodian name</div>
+                {editingClassField === "teacher" ? (
+                  <div style={styles.classFieldEditRow}>
+                    <input
+                      style={styles.chalkInput}
+                      placeholder="Custodian name"
+                      value={classFieldDraft}
+                      onChange={(e) => setClassFieldDraft(e.target.value)}
+                      onKeyDown={(e) => e.key === "Enter" && saveClassField()}
+                      autoFocus
+                    />
+                    <button style={styles.classIconBtn} onClick={saveClassField} aria-label="Save custodian name"><Check size={15} /></button>
+                    <button style={styles.classIconBtn} onClick={cancelEditClassField} aria-label="Cancel"><X size={14} /></button>
+                  </div>
+                ) : (
+                  <div style={styles.classFieldViewRow}>
+                    <div style={styles.classFieldValue}>{classInfo.teacher || "Set nahi hai"}</div>
+                    <button style={styles.classFieldEditBtn} onClick={() => startEditClassField("teacher")} aria-label="Edit custodian name"><Pencil size={13} /></button>
+                  </div>
+                )}
+              </div>
             </div>
           </div>
         </div>
@@ -856,15 +1262,15 @@ function AttendanceApp({ userEmail, onLogout, isGuest, isAdmin, client, signupCl
           </button>
         </div>
 
-        <div style={styles.paper} className={view === "reports" ? "print-paper" : ""}>
+        <div style={styles.paper} className={(view === "reports" || view === "register") ? "print-paper" : ""}>
           {view === "enrollment" && (
             <>
-              <div style={styles.sectionLabel}>Ek student add karo</div>
+              <div style={styles.sectionLabel}>Ek candidate add karo</div>
               <div style={styles.addRow}>
                 <input style={{ ...styles.textInput, width: 64, flexShrink: 0 }} placeholder="Roll" value={newRoll} onChange={(e) => setNewRoll(e.target.value)} />
-                <input ref={nameInputRef} style={{ ...styles.textInput, flex: 1 }} placeholder="Student name" value={newName}
+                <input ref={nameInputRef} style={{ ...styles.textInput, flex: 1 }} placeholder="Candidate name" value={newName}
                   onChange={(e) => setNewName(e.target.value)} onKeyDown={(e) => e.key === "Enter" && addStudent()} />
-                <button style={styles.addBtn} onClick={addStudent} aria-label="Add student"><Plus size={18} /></button>
+                <button style={styles.addBtn} onClick={addStudent} aria-label="Add candidate"><Plus size={18} /></button>
               </div>
 
               <div style={styles.sectionLabel}>Ya ek saath poori list paste karo (ek line me ek naam)</div>
@@ -873,16 +1279,34 @@ function AttendanceApp({ userEmail, onLogout, isGuest, isAdmin, client, signupCl
               <button style={styles.bulkBtn} onClick={addBulk} disabled={!bulkText.trim()}>Sabko enroll karo</button>
 
               <div style={{ ...styles.sectionLabel, marginTop: 18 }}>
-                {classInfo.className || "Is class"} me enrolled students ({students.filter((s) => s.active !== false).length} active / {students.length} total)
+                {classInfo.className || "Is entities"} me enrolled candidates ({students.filter((s) => s.active !== false).length} active / {students.length} total)
               </div>
+
+              {students.length > 5 && (
+                <div style={styles.searchRow}>
+                  <SearchIcon size={15} color="#b3a889" style={{ flexShrink: 0 }} />
+                  <input
+                    style={styles.searchInput}
+                    placeholder="Naam ya roll se search karo…"
+                    value={enrollSearch}
+                    onChange={(e) => setEnrollSearch(e.target.value)}
+                  />
+                  {enrollSearch && (
+                    <button style={styles.searchClearBtn} onClick={() => setEnrollSearch("")} aria-label="Clear search"><X size={14} /></button>
+                  )}
+                </div>
+              )}
+
               {students.length === 0 ? (
-                <div style={styles.empty}>Abhi koi student enroll nahi hua.</div>
+                <div style={styles.empty}>Abhi koi candidate enroll nahi hua.</div>
+              ) : enrollListShown.length === 0 ? (
+                <div style={styles.empty}>"{enrollSearch}" se koi candidate nahi mila.</div>
               ) : (
                 <div style={styles.ledger}>
-                  {students.map((s, idx) => {
+                  {enrollListShown.map((s, idx) => {
                     const isActive = s.active !== false;
                     return (
-                    <div key={s.id} style={{ ...styles.ledgerRow, borderBottom: idx === students.length - 1 ? "none" : "1px dashed #d8cfae", opacity: isActive ? 1 : 0.55 }}>
+                    <div key={s.id} style={{ ...styles.ledgerRow, alignItems: "flex-start", borderBottom: idx === enrollListShown.length - 1 ? "none" : "1px dashed #d8cfae", opacity: isActive ? 1 : 0.55 }}>
                       {editingId === s.id ? (
                         <>
                           <input style={{ ...styles.textInput, width: 50, padding: "5px 6px" }} value={editRoll} onChange={(e) => setEditRoll(e.target.value)} />
@@ -893,7 +1317,7 @@ function AttendanceApp({ userEmail, onLogout, isGuest, isAdmin, client, signupCl
                         <>
                           <div style={styles.rollBadge}>{s.roll}</div>
                           <div style={styles.studentName}>
-                            <div style={styles.studentNameLine}>
+                            <div style={{ ...styles.studentNameLine, ...styles.studentNameLineWrap }}>
                               {s.name}
                               {!isActive && <span style={styles.inactiveTag}>Inactive</span>}
                             </div>
@@ -903,6 +1327,22 @@ function AttendanceApp({ userEmail, onLogout, isGuest, isAdmin, client, signupCl
                               </div>
                             )}
                           </div>
+                          {isAdmin ? (
+                            <button
+                              style={{ ...styles.deleteBtn, color: s.starred ? "#D14343" : "#c9bd98" }}
+                              onClick={() => toggleStar(s.id)}
+                              aria-label={s.starred ? `Remove star from ${s.name}` : `Star mark ${s.name}`}
+                              title={s.starred ? "Star hataane ke liye tap karo" : "Star mark karne ke liye tap karo"}
+                            >
+                              <Star size={14} fill={s.starred ? "#D14343" : "none"} />
+                            </button>
+                          ) : (
+                            s.starred && (
+                              <span title="Admin dwara star mark" style={{ display: "inline-flex", color: "#D14343", flexShrink: 0 }}>
+                                <Star size={14} fill="#D14343" />
+                              </span>
+                            )
+                          )}
                           <button
                             style={{ ...styles.deleteBtn, color: isActive ? "#4C8C5B" : "#b3a889" }}
                             onClick={() => toggleActive(s.id)}
@@ -936,7 +1376,76 @@ function AttendanceApp({ userEmail, onLogout, isGuest, isAdmin, client, signupCl
                 <button style={styles.dateArrow} onClick={() => shiftDate(1)} aria-label="Next day"><ChevronRight size={18} /></button>
               </div>
 
-              {activeStudents.length > 0 && (
+              <div style={{ marginBottom: 10 }} className="no-print">
+                <button
+                  style={{ ...styles.teacherModeBtn, ...(teacherMode ? styles.teacherModeBtnActive : {}) }}
+                  onClick={() => setTeacherMode((v) => !v)}
+                >
+                  ⏱️ Time Mode {teacherMode ? "ON" : "OFF"}
+                </button>
+                {teacherMode && (
+                  <>
+                    <div style={styles.teacherModeHint}>Present dabate hi naam ke niche time print hoga, aur ek selfie proof photo li jaayegi.</div>
+                    <div style={{ ...styles.teacherModeHint, marginTop: 2, fontSize: 10 }}>(Selfie sirf proof ke liye hai — ye liveness-verified nahi hai. 45 din baad selfies khud-ba-khud delete ho jaati hain.)</div>
+                    {lateTime && !lateTimeEditing ? (
+                      <div style={styles.lateTimeSavedRow}>
+                        <span style={styles.lateTimeLabel}>⏰ {lateTime} ke baad Late maana jayega</span>
+                        <button style={styles.lateTimeEditLink} onClick={() => setLateTimeEditing(true)}>Badlo</button>
+                      </div>
+                    ) : (
+                      <div style={styles.lateTimeRow}>
+                        <span style={styles.lateTimeLabel}>⏰ Is time ke baad Late maana jaye:</span>
+                        <input
+                          type="time"
+                          style={styles.lateTimeInput}
+                          value={lateTime}
+                          onChange={(e) => setLateTime(e.target.value)}
+                          autoFocus={lateTimeEditing}
+                        />
+                        <button
+                          style={styles.lateTimeSaveBtn}
+                          onClick={() => setLateTimeEditing(false)}
+                          disabled={!lateTime}
+                          aria-label="Late time save karo"
+                        >
+                          <Check size={13} />
+                        </button>
+                        {lateTime && (
+                          <button style={styles.lateTimeClearBtn} onClick={() => { setLateTime(""); setLateTimeEditing(false); }} aria-label="Late time hatao">
+                            <X size={12} />
+                          </button>
+                        )}
+                      </div>
+                    )}
+                  </>
+                )}
+              </div>
+
+              {holidays[selectedDate] ? (
+                <div style={styles.holidayActiveRow} className="no-print">
+                  <span style={styles.holidayBadge}>🎌 {holidays[selectedDate]}</span>
+                  <button style={styles.linkBtnDark} onClick={() => toggleHoliday(selectedDate)}>Holiday hataao</button>
+                </div>
+              ) : showHolidayForm ? (
+                <div style={styles.classFieldEditRow} className="no-print">
+                  <input
+                    style={styles.textInput}
+                    placeholder="Holiday ka naam (e.g. Sunday / Gandhi Jayanti)"
+                    value={holidayDraft}
+                    onChange={(e) => setHolidayDraft(e.target.value)}
+                    onKeyDown={(e) => e.key === "Enter" && (toggleHoliday(selectedDate, holidayDraft), setShowHolidayForm(false))}
+                    autoFocus
+                  />
+                  <button style={styles.classIconBtn} onClick={() => { toggleHoliday(selectedDate, holidayDraft); setShowHolidayForm(false); }} aria-label="Save holiday"><Check size={15} color="#4C8C5B" /></button>
+                  <button style={styles.classIconBtn} onClick={() => setShowHolidayForm(false)} aria-label="Cancel"><X size={14} color="#b05a4a" /></button>
+                </div>
+              ) : (
+                <div style={{ marginBottom: 10 }} className="no-print">
+                  <button style={styles.holidayMarkBtn} onClick={() => setShowHolidayForm(true)}>🎌 Is din ko holiday/chutti mark karo</button>
+                </div>
+              )}
+
+              {!holidays[selectedDate] && activeStudents.length > 0 && (
                 <div style={styles.bulkMarkRow}>
                   {(() => {
                     const day = attendance[selectedDate] || {};
@@ -957,22 +1466,67 @@ function AttendanceApp({ userEmail, onLogout, isGuest, isAdmin, client, signupCl
                 </div>
               )}
 
-              {activeStudents.length === 0 ? (
-                <div style={styles.empty}>{students.length ? "Sabhi students inactive hain. Enrollment tab me unhe active karo." : "Pehle Enrollment tab se students add karo."}</div>
+              {!holidays[selectedDate] && activeStudents.length > 5 && (
+                <div style={styles.searchRow} className="no-print">
+                  <SearchIcon size={15} color="#b3a889" style={{ flexShrink: 0 }} />
+                  <input
+                    style={styles.searchInput}
+                    placeholder="Naam ya roll se search karo…"
+                    value={registerSearch}
+                    onChange={(e) => setRegisterSearch(e.target.value)}
+                  />
+                  {registerSearch && (
+                    <button style={styles.searchClearBtn} onClick={() => setRegisterSearch("")} aria-label="Clear search"><X size={14} /></button>
+                  )}
+                </div>
+              )}
+
+              {holidays[selectedDate] ? (
+                <div style={styles.empty}>Aaj "{holidays[selectedDate]}" ke karan chhutti hai — attendance mark nahi hogi. Report me is din ki jagah poori column me line bhar jaayegi.</div>
+              ) : activeStudents.length === 0 ? (
+                <div style={styles.empty}>{students.length ? "Sabhi candidates inactive hain. Enrollment tab me unhe active karo." : "Pehle Enrollment tab se candidates add karo."}</div>
+              ) : registerListShown.length === 0 ? (
+                <div style={styles.empty}>"{registerSearch}" se koi candidate nahi mila.</div>
               ) : (
                 <div style={styles.ledger}>
-                  {activeStudents.map((s, idx) => {
+                  {registerListShown.map((s, idx) => {
                     const st = dayRecord[s.id];
                     return (
-                      <div key={s.id} style={{ ...styles.ledgerRow, borderBottom: idx === activeStudents.length - 1 ? "none" : "1px dashed #d8cfae" }}>
+                      <div key={s.id} style={{ ...styles.ledgerRow, borderBottom: idx === registerListShown.length - 1 ? "none" : "1px dashed #d8cfae" }}>
                         <div style={styles.rollBadge}>{s.roll}</div>
-                        <div style={{ ...styles.studentName, ...styles.studentNameLine }}>{s.name}</div>
+                        <div style={styles.studentName}>
+                          <div style={styles.studentNameLine}>
+                            {s.starred && <Star size={12} fill="#D14343" color="#D14343" style={{ marginRight: 4, verticalAlign: -1, flexShrink: 0 }} />}
+                            {s.name}
+                          </div>
+                          {teacherMode && st === "P" && attendanceTimes[selectedDate] && attendanceTimes[selectedDate][s.id] && (() => {
+                            const stampedTime = attendanceTimes[selectedDate][s.id];
+                            const late = isLateStamp(stampedTime, lateTime);
+                            return (
+                              <div style={late ? styles.studentTimeTagLate : styles.studentTimeTag}>
+                                🕐 {stampedTime}{late && " · Late"}
+                              </div>
+                            );
+                          })()}
+                          {teacherMode && st === "P" && attendanceSelfies[selectedDate] && attendanceSelfies[selectedDate][s.id] && (
+                            <img src={attendanceSelfies[selectedDate][s.id]} alt="Selfie proof" style={styles.studentSelfieThumb} />
+                          )}
+                        </div>
                         <div style={styles.statusGroup}>
-                          {["P", "A", "L"].map((code) => {
+                          {["P", "A"].map((code) => {
                             const active = st === code;
                             const anim = justStamped === s.id + code;
                             return (
-                              <button key={code} className={anim ? "stamp-pop chalk-btn" : "chalk-btn"} onClick={() => markStatus(s.id, code)}
+                              <button
+                                key={code}
+                                className={anim ? "stamp-pop chalk-btn" : "chalk-btn"}
+                                onClick={() => {
+                                  if (code === "P" && teacherMode && st !== "P") {
+                                    setSelfieTarget(s);
+                                  } else {
+                                    markStatus(s.id, code);
+                                  }
+                                }}
                                 style={{ ...styles.statusBtn, borderColor: STATUS[code].color, background: active ? STATUS[code].color : "transparent", color: active ? "#fdfaf0" : STATUS[code].color }}
                                 aria-label={STATUS[code].label} title={STATUS[code].label}>
                                 {STATUS[code].short}
@@ -986,7 +1540,7 @@ function AttendanceApp({ userEmail, onLogout, isGuest, isAdmin, client, signupCl
                 </div>
               )}
 
-              {activeStudents.length > 0 && (
+              {!holidays[selectedDate] && activeStudents.length > 0 && (
                 <div style={styles.summary}>
                   <div style={styles.summaryStamp}>
                     <div style={styles.summaryPct}>{pct}%</div>
@@ -1002,6 +1556,19 @@ function AttendanceApp({ userEmail, onLogout, isGuest, isAdmin, client, signupCl
                   </div>
                 </div>
               )}
+
+              {!holidays[selectedDate] && activeStudents.length > 0 && (
+                <>
+                  <button
+                    style={{ ...styles.printBtn, marginTop: 14, width: "100%", display: "flex", alignItems: "center", justifyContent: "center", padding: "11px 0" }}
+                    className="no-print"
+                    onClick={printReport}
+                  >
+                    <Printer size={14} style={{ marginRight: 6, verticalAlign: -2 }} />Print PDF
+                  </button>
+                  <div className="no-print" style={styles.pdfHint}>Print dialog me "Save as PDF" choose karo.</div>
+                </>
+              )}
             </>
           )}
 
@@ -1011,9 +1578,9 @@ function AttendanceApp({ userEmail, onLogout, isGuest, isAdmin, client, signupCl
                 {[
                   { k: "month", label: "Monthly" },
                   { k: "year", label: "Yearly" },
-                  { k: "student", label: "Student" },
+                  { k: "student", label: "Candidate" },
                   { k: "day", label: "Date-wise" },
-                  { k: "grid", label: "All Students" },
+                  { k: "grid", label: "All Candidates" },
                 ].map((opt) => (
                   <button key={opt.k} onClick={() => setReportScope(opt.k)}
                     style={{ ...styles.scopeBtn, ...(reportScope === opt.k ? styles.scopeBtnActive : {}) }}>
@@ -1037,15 +1604,15 @@ function AttendanceApp({ userEmail, onLogout, isGuest, isAdmin, client, signupCl
                   <div className="print-only" style={styles.printOnlyHeader}>
                     <div style={styles.printOnlyMainTitle}>Monthly Attendance Report</div>
                     <div style={styles.printOnlyMeta}>
-                      {classInfo.className && <span>Class: {classInfo.className}</span>}
-                      {classInfo.teacher && <span>Teacher: {classInfo.teacher}</span>}
+                      {classInfo.className && <span>Entities: {classInfo.className}</span>}
+                      {classInfo.teacher && <span>Custodian: {classInfo.teacher}</span>}
                       <span>Month: {monthLabel}</span>
                       <span>Generated: {new Date().toLocaleDateString("en-IN", { day: "numeric", month: "short", year: "numeric" })}</span>
                     </div>
                   </div>
 
                   {students.length === 0 ? (
-                    <div style={styles.empty}>Abhi koi student enroll nahi hai.</div>
+                    <div style={styles.empty}>Abhi koi candidate enroll nahi hai.</div>
                   ) : monthDates.length === 0 ? (
                     <div style={styles.empty}>Is mahine ke liye abhi koi attendance mark nahi hui.</div>
                   ) : (
@@ -1073,7 +1640,7 @@ function AttendanceApp({ userEmail, onLogout, isGuest, isAdmin, client, signupCl
                       <div style={styles.summary}>
                         <div style={styles.summaryStamp}>
                           <div style={styles.summaryPct}>{monthClassAvg === null ? "—" : `${monthClassAvg}%`}</div>
-                          <div style={styles.summaryPctLabel}>class average</div>
+                          <div style={styles.summaryPctLabel}>entities average</div>
                         </div>
                         <div style={styles.summaryStats}><div style={styles.summaryStatLine2}>{monthDates.length} din mark hue is mahine</div></div>
                         <button style={styles.printBtn} className="no-print" onClick={printReport}><Printer size={14} style={{ marginRight: 5, verticalAlign: -2 }} />Download PDF</button>
@@ -1095,21 +1662,21 @@ function AttendanceApp({ userEmail, onLogout, isGuest, isAdmin, client, signupCl
                     <button style={styles.dateArrow} onClick={() => shiftYear(1)} aria-label="Next year"><ChevronRight size={18} /></button>
                   </div>
 
-                  <div style={styles.printTitle}>Yearly Attendance Report — {selectedYear}{classInfo.className ? ` · ${classInfo.className}` : ""}</div>
+                  <div style={styles.printTitle}>Yearly Attendance Report — {academicYearLabel(selectedYear)}{classInfo.className ? ` · ${classInfo.className}` : ""}</div>
                   <div className="print-only" style={styles.printOnlyHeader}>
                     <div style={styles.printOnlyMainTitle}>Yearly Attendance Report</div>
                     <div style={styles.printOnlyMeta}>
-                      {classInfo.className && <span>Class: {classInfo.className}</span>}
-                      {classInfo.teacher && <span>Teacher: {classInfo.teacher}</span>}
-                      <span>Year: {selectedYear}</span>
+                      {classInfo.className && <span>Entities: {classInfo.className}</span>}
+                      {classInfo.teacher && <span>Custodian: {classInfo.teacher}</span>}
+                      <span>Year: {academicYearLabel(selectedYear)}</span>
                       <span>Generated: {new Date().toLocaleDateString("en-IN", { day: "numeric", month: "short", year: "numeric" })}</span>
                     </div>
                   </div>
 
                   {students.length === 0 ? (
-                    <div style={styles.empty}>Abhi koi student enroll nahi hai.</div>
+                    <div style={styles.empty}>Abhi koi candidate enroll nahi hai.</div>
                   ) : yearDates.length === 0 ? (
-                    <div style={styles.empty}>{selectedYear} me abhi koi attendance mark nahi hui.</div>
+                    <div style={styles.empty}>{academicYearLabel(selectedYear)} me abhi koi attendance mark nahi hui.</div>
                   ) : (
                     <>
                       <div style={styles.reportTableWrap} className="print-table">
@@ -1137,9 +1704,9 @@ function AttendanceApp({ userEmail, onLogout, isGuest, isAdmin, client, signupCl
                       <div style={styles.summary}>
                         <div style={styles.summaryStamp}>
                           <div style={styles.summaryPct}>{yearClassAvg === null ? "—" : `${yearClassAvg}%`}</div>
-                          <div style={styles.summaryPctLabel}>class average</div>
+                          <div style={styles.summaryPctLabel}>entities average</div>
                         </div>
-                        <div style={styles.summaryStats}><div style={styles.summaryStatLine2}>{yearDates.length} din mark hue {selectedYear} me</div></div>
+                        <div style={styles.summaryStats}><div style={styles.summaryStatLine2}>{yearDates.length} din mark hue {academicYearLabel(selectedYear)} me</div></div>
                         <button style={styles.printBtn} className="no-print" onClick={printReport}><Printer size={14} style={{ marginRight: 5, verticalAlign: -2 }} />Download PDF</button>
                       </div>
                       <div className="no-print" style={styles.pdfHint}>Print dialog me "Save as PDF" choose karo.</div>
@@ -1151,24 +1718,21 @@ function AttendanceApp({ userEmail, onLogout, isGuest, isAdmin, client, signupCl
               {reportScope === "student" && (
                 <>
                   <div className="no-print" style={styles.studentPickRow}>
-                    <select style={styles.selectInput} value={selectedStudentId} onChange={(e) => setSelectedStudentId(e.target.value)}>
-                      {students.length === 0 && <option value="">Koi student nahi</option>}
-                      {students.map((s) => (<option key={s.id} value={s.id}>{s.roll} — {s.name}</option>))}
-                    </select>
+                    <StudentSearchSelect students={students} value={selectedStudentId} onChange={setSelectedStudentId} />
                     <input type="number" value={selectedYear} onChange={(e) => setSelectedYear(e.target.value)} style={{ ...styles.dateInput, width: 84, textAlign: "center" }} />
                   </div>
 
                   {!selectedStudent ? (
-                    <div style={styles.empty}>Pehle Enrollment tab se students add karo.</div>
+                    <div style={styles.empty}>Pehle Enrollment tab se candidates add karo.</div>
                   ) : (
                     <>
-                      <div style={styles.printTitle}>Student Attendance Report — {selectedYear}</div>
+                      <div style={styles.printTitle}>Candidate Attendance Report — {academicYearLabel(selectedYear)}</div>
                       <div className="print-only" style={styles.printOnlyHeader}>
-                        <div style={styles.printOnlyMainTitle}>Student Attendance Report</div>
+                        <div style={styles.printOnlyMainTitle}>Candidate Attendance Report</div>
                         <div style={styles.printOnlyMeta}>
-                          <span>Student: {selectedStudent.name} (Roll {selectedStudent.roll})</span>
-                          {classInfo.className && <span>Class: {classInfo.className}</span>}
-                          <span>Year: {selectedYear}</span>
+                          <span>Candidate: {selectedStudent.name} (Roll {selectedStudent.roll})</span>
+                          {classInfo.className && <span>Entities: {classInfo.className}</span>}
+                          <span>Year: {academicYearLabel(selectedYear)}</span>
                           <span>Generated: {new Date().toLocaleDateString("en-IN", { day: "numeric", month: "short", year: "numeric" })}</span>
                         </div>
                       </div>
@@ -1183,7 +1747,7 @@ function AttendanceApp({ userEmail, onLogout, isGuest, isAdmin, client, signupCl
                           <div style={{ ...styles.summaryPct, color: barColor(studentYearTotal.percent), fontSize: 20 }}>
                             {studentYearTotal.percent === null ? "—" : `${studentYearTotal.percent}%`}
                           </div>
-                          <div style={styles.summaryPctLabel}>{selectedYear} overall</div>
+                          <div style={styles.summaryPctLabel}>{academicYearLabel(selectedYear)} overall</div>
                         </div>
                       </div>
 
@@ -1239,10 +1803,7 @@ function AttendanceApp({ userEmail, onLogout, isGuest, isAdmin, client, signupCl
               {reportScope === "day" && (
                 <>
                   <div className="no-print" style={styles.studentPickRow}>
-                    <select style={styles.selectInput} value={selectedStudentId} onChange={(e) => setSelectedStudentId(e.target.value)}>
-                      {students.length === 0 && <option value="">Koi student nahi</option>}
-                      {students.map((s) => (<option key={s.id} value={s.id}>{s.roll} — {s.name}</option>))}
-                    </select>
+                    <StudentSearchSelect students={students} value={selectedStudentId} onChange={setSelectedStudentId} />
                   </div>
                   <div style={styles.dateNav} className="no-print">
                     <button style={styles.dateArrow} onClick={() => shiftMonth(-1)} aria-label="Previous month"><ChevronLeft size={18} /></button>
@@ -1254,15 +1815,15 @@ function AttendanceApp({ userEmail, onLogout, isGuest, isAdmin, client, signupCl
                   </div>
 
                   {!selectedStudent ? (
-                    <div style={styles.empty}>Pehle Enrollment tab se students add karo.</div>
+                    <div style={styles.empty}>Pehle Enrollment tab se candidates add karo.</div>
                   ) : (
                     <>
                       <div style={styles.printTitle}>Date-wise Attendance — {selectedStudent.name} · {monthLabel}</div>
                       <div className="print-only" style={styles.printOnlyHeader}>
                         <div style={styles.printOnlyMainTitle}>Date-wise Attendance Record</div>
                         <div style={styles.printOnlyMeta}>
-                          <span>Student: {selectedStudent.name} (Roll {selectedStudent.roll})</span>
-                          {classInfo.className && <span>Class: {classInfo.className}</span>}
+                          <span>Candidate: {selectedStudent.name} (Roll {selectedStudent.roll})</span>
+                          {classInfo.className && <span>Entities: {classInfo.className}</span>}
                           <span>Month: {monthLabel}</span>
                           <span>Generated: {new Date().toLocaleDateString("en-IN", { day: "numeric", month: "short", year: "numeric" })}</span>
                         </div>
@@ -1280,7 +1841,7 @@ function AttendanceApp({ userEmail, onLogout, isGuest, isAdmin, client, signupCl
                         <table style={styles.reportTable}>
                           <thead><tr>
                             <th style={{ ...styles.th, textAlign: "left" }}>Date</th>
-                            <th style={styles.th}>Day</th>
+                            <th style={styles.th}>{teacherMode ? "Time" : "Day"}</th>
                             <th style={{ ...styles.th, textAlign: "left" }}>Status</th>
                           </tr></thead>
                           <tbody>
@@ -1291,10 +1852,28 @@ function AttendanceApp({ userEmail, onLogout, isGuest, isAdmin, client, signupCl
                                   <td style={{ ...styles.td, textAlign: "left" }}>
                                     {String(row.day).padStart(2, "0")} {monthLabel.split(" ")[0]}
                                   </td>
-                                  <td style={styles.td}>{row.weekday}</td>
+                                  <td style={styles.td}>
+                                    {teacherMode ? (
+                                      row.time ? (
+                                        <span style={{ color: row.late ? "#C1503D" : "#4C8C5B", fontWeight: 700, fontFamily: "'IBM Plex Mono', monospace" }}>
+                                          {fullTimeNoAmPm(row.time)}
+                                        </span>
+                                      ) : (
+                                        <span style={{ color: "#c9c0a3" }}>·</span>
+                                      )
+                                    ) : (
+                                      row.weekday
+                                    )}
+                                  </td>
                                   <td style={{ ...styles.td, textAlign: "left" }}>
                                     {info ? (
-                                      <span style={{ color: info.color, fontWeight: 700 }}>{info.label}</span>
+                                      row.status === "P" && teacherMode && row.time ? (
+                                        <span style={{ color: row.late ? "#C1503D" : STATUS.P.color, fontWeight: 700 }}>
+                                          {row.late ? "Late" : "On time"}
+                                        </span>
+                                      ) : (
+                                        <span style={{ color: info.color, fontWeight: 700 }}>{info.label}</span>
+                                      )
                                     ) : (
                                       <span style={{ color: "#b3a889" }}>Not marked</span>
                                     )}
@@ -1331,60 +1910,112 @@ function AttendanceApp({ userEmail, onLogout, isGuest, isAdmin, client, signupCl
                   <div className="print-only" style={styles.printOnlyHeader}>
                     <div style={styles.printOnlyMainTitle}>Attendance Register</div>
                     <div style={styles.printOnlyMeta}>
-                      {classInfo.className && <span>Class: {classInfo.className}</span>}
-                      {classInfo.teacher && <span>Teacher: {classInfo.teacher}</span>}
+                      {classInfo.className && <span>Entities: {classInfo.className}</span>}
+                      {classInfo.teacher && <span>Custodian: {classInfo.teacher}</span>}
                       <span>Month: {monthLabel}</span>
-                      <span>Legend: P=Present, A=Absent, L=Leave</span>
+                      <span>Legend: P=Present, A=Absent, L=Leave. Shaded column = Holiday</span>
                     </div>
                   </div>
 
                   {students.length === 0 ? (
-                    <div style={styles.empty}>Abhi koi student enroll nahi hai.</div>
+                    <div style={styles.empty}>Abhi koi candidate enroll nahi hai.</div>
                   ) : (
                     <>
+                      {students.length > 5 && (
+                        <div style={styles.searchRow} className="no-print">
+                          <SearchIcon size={15} color="#b3a889" style={{ flexShrink: 0 }} />
+                          <input
+                            style={styles.searchInput}
+                            placeholder="Naam ya roll se search karo…"
+                            value={gridSearch}
+                            onChange={(e) => setGridSearch(e.target.value)}
+                          />
+                          {gridSearch && (
+                            <button style={styles.searchClearBtn} onClick={() => setGridSearch("")} aria-label="Clear search"><X size={14} /></button>
+                          )}
+                        </div>
+                      )}
                       <div className="no-print" style={styles.pdfHint}>{"\u2190"} Left-right scroll karo poori table dekhne ke liye</div>
                       <div style={styles.gridTableWrap} className="print-table">
-                        <table style={styles.gridTable} className="grid-print-table">
+                        <table style={{ ...styles.gridTable, "--daycols": daysInSelectedMonth }} className="grid-print-table">
                           <thead>
                             <tr>
                               <th style={styles.gridThName} className="grid-name-col">Roll</th>
                               <th style={{ ...styles.gridThName, textAlign: "left" }} className="grid-name-col">Name</th>
-                              {Array.from({ length: daysInSelectedMonth }, (_, i) => i + 1).map((d) => (
-                                <th key={d} style={styles.gridThDay}>{d}</th>
-                              ))}
+                              {Array.from({ length: daysInSelectedMonth }, (_, i) => i + 1).map((d) => {
+                                const dateStr = `${selectedMonth}-${String(d).padStart(2, "0")}`;
+                                const isHol = holidays[dateStr];
+                                return (
+                                  <th key={d} style={{ ...styles.gridThDay, ...(isHol ? styles.gridThHoliday : {}) }} className="grid-date-col" title={isHol || undefined}>{d}</th>
+                                );
+                              })}
                               <th style={styles.gridThTotal}>Total P</th>
                             </tr>
                           </thead>
                           <tbody>
-                            {gridRows.map((s) => (
-                              <tr key={s.id}>
-                                <td style={styles.gridTdName} className="grid-name-col">{s.roll}</td>
-                                <td style={{ ...styles.gridTdName, textAlign: "left" }} className="grid-name-col">{s.name}</td>
-                                {s.days.map((st, i) => {
-                                  const info = st ? STATUS[st] : null;
-                                  return (
-                                    <td key={i} style={{ ...styles.gridTdDay, color: info ? info.color : "#c9c0a3", fontWeight: info ? 700 : 400 }}>
-                                      {info ? info.short : "·"}
-                                    </td>
-                                  );
-                                })}
-                                <td style={styles.gridTdTotal}>{s.totalPresent}</td>
-                              </tr>
-                            ))}
+                            {(() => {
+                              const rows = gridRows.filter((s) => matchesSearch(s, gridSearch));
+                              return rows.map((s, rowIdx) => (
+                                <tr key={s.id}>
+                                  <td style={styles.gridTdName} className="grid-name-col">{s.roll}</td>
+                                  <td style={{ ...styles.gridTdName, textAlign: "left" }} className="grid-name-col">
+                                    <div>{s.name}</div>
+                                    {(s.lateCount > 0 || s.absentCount > 0) && (
+                                      <div style={styles.gridNameSummary}>
+                                        {s.lateCount > 0 && <span style={styles.gridNameSummaryLate}>L-{s.lateCount}</span>}
+                                        {s.absentCount > 0 && <span style={styles.gridNameSummaryAbsent}>A-{s.absentCount}</span>}
+                                      </div>
+                                    )}
+                                  </td>
+                                  {s.days.map((st, i) => {
+                                    const d = i + 1;
+                                    const dateStr = `${selectedMonth}-${String(d).padStart(2, "0")}`;
+                                    const isHol = holidays[dateStr];
+                                    if (isHol) {
+                                      if (rowIdx !== 0) return null;
+                                      return (
+                                        <td key={i} rowSpan={rows.length} style={styles.gridTdHoliday} className="grid-holiday-col" title={isHol}>
+                                          <div style={styles.gridHolidayCellWrap}>
+                                            <div style={styles.gridHolidayDateTag}>{d}</div>
+                                            <div style={styles.gridHolidayLabel}>{isHol}</div>
+                                          </div>
+                                        </td>
+                                      );
+                                    }
+                                    const info = st ? STATUS[st] : null;
+                                    const timeVal = teacherMode && st === "P" && attendanceTimes[dateStr] && attendanceTimes[dateStr][s.id];
+                                    return (
+                                      <td key={i} style={{ ...styles.gridTdDay, color: info ? info.color : "#c9c0a3", fontWeight: info ? 700 : 400 }} className="grid-date-col">
+                                        {timeVal ? (
+                                          <div style={styles.gridTdTimeVertical}>{fullTimeNoAmPm(timeVal)}</div>
+                                        ) : (
+                                          <div>{info ? info.short : "·"}</div>
+                                        )}
+                                      </td>
+                                    );
+                                  })}
+                                  <td style={styles.gridTdTotal}>{s.totalPresent}</td>
+                                </tr>
+                              ));
+                            })()}
                           </tbody>
                         </table>
                       </div>
                       <div className="no-print" style={{ ...styles.pdfHint, marginTop: 6 }}>
                         Legend: <span style={{ color: STATUS.P.color, fontWeight: 700 }}>P</span> Present ·{" "}
                         <span style={{ color: STATUS.A.color, fontWeight: 700 }}>A</span> Absent ·{" "}
-                        <span style={{ color: STATUS.L.color, fontWeight: 700 }}>L</span> Leave
+                        <span style={{ color: STATUS.L.color, fontWeight: 700 }}>L</span> Leave ·{" "}
+                        <span style={{ background: "#fdf3de", border: "1px solid #e8c468", padding: "0 5px", fontWeight: 700, color: "#8a5a1c" }}>▍</span> Holiday/Chutti (naam column me likha hoga)
+                        {" · "}Naam ke niche <span style={{ color: "#C1503D", fontWeight: 700 }}>L-x</span> (Late) aur <span style={{ color: "#B23A3A", fontWeight: 700 }}>A-x</span> (Absent) is mahine ka total hai.
                       </div>
 
                       <div style={styles.summary}>
                         <div style={{ flex: 1 }} />
                         <button style={styles.printBtn} className="no-print" onClick={printReport}><Printer size={14} style={{ marginRight: 5, verticalAlign: -2 }} />Download PDF</button>
                       </div>
-                      <div className="no-print" style={styles.pdfHint}>Print dialog me "Save as PDF" (landscape mode recommend) choose karo.</div>
+                      <div className="no-print" style={styles.landscapeWarn}>
+                        ⚠️ Poori table ek page me chahiye to Print dialog khulne par upar "Portrait" wale dropdown/Layout option par tap karke <b>Landscape</b> select karo, fir "Save as PDF" karo. (Android par ye setting app khud set nahi kar sakta, isliye manually badalni padti hai.)
+                      </div>
                     </>
                   )}
                 </>
@@ -1395,6 +2026,22 @@ function AttendanceApp({ userEmail, onLogout, isGuest, isAdmin, client, signupCl
 
         {saveError && <div style={styles.errorBanner} className="no-print">Save nahi ho paaya — data sirf is session ke liye hai.</div>}
       </div>
+
+      {selfieTarget && (
+        <SelfieCaptureModal
+          studentName={selfieTarget.name}
+          onCapture={(dataUrl) => {
+            markStatus(selfieTarget.id, "P");
+            setAttendanceSelfies((prev) => {
+              const day = { ...(prev[selectedDate] || {}) };
+              day[selfieTarget.id] = dataUrl;
+              return { ...prev, [selectedDate]: day };
+            });
+            setSelfieTarget(null);
+          }}
+          onCancel={() => setSelfieTarget(null)}
+        />
+      )}
     </div>
   );
 }
@@ -1427,6 +2074,16 @@ const styles = {
   classIconBtn: { background: "rgba(245,243,231,0.14)", border: "1px solid rgba(245,243,231,0.3)", borderRadius: 7, color: "#F5F3E7", width: 30, height: 30, display: "flex", alignItems: "center", justifyContent: "center", cursor: "pointer", flexShrink: 0 },
   newClassRow: { display: "flex", alignItems: "center", gap: 6, marginBottom: 10, background: "rgba(0,0,0,0.15)", padding: 6, borderRadius: 8 },
   classRow: { display: "flex", gap: 8 },
+  classFieldsWrap: { display: "flex", flexDirection: "column", gap: 10 },
+  classFieldBlock: { display: "flex", flexDirection: "column", gap: 3 },
+  classFieldLabel: { fontFamily: "'Inter', sans-serif", fontSize: 10.5, fontWeight: 600, letterSpacing: 0.3, color: "rgba(245,243,231,0.55)", textTransform: "uppercase" },
+  classFieldViewRow: { display: "flex", alignItems: "center", gap: 8, borderBottom: "1.5px dashed rgba(245,243,231,0.3)", paddingBottom: 5 },
+  classFieldValue: { flex: 1, fontFamily: "'Kalam', cursive", fontSize: 15, color: "#F5F3E7", minWidth: 0, overflowWrap: "anywhere" },
+  classFieldEditBtn: { background: "transparent", border: "none", color: "rgba(245,243,231,0.65)", cursor: "pointer", padding: 3, flexShrink: 0, display: "flex" },
+  classFieldEditRow: { display: "flex", alignItems: "center", gap: 6 },
+  searchRow: { display: "flex", alignItems: "center", gap: 6, background: "#fffdf7", border: "1px solid #d8cfae", borderRadius: 8, padding: "6px 10px", marginBottom: 10 },
+  searchInput: { flex: 1, border: "none", background: "transparent", outline: "none", fontSize: 13, color: "#2B2318", fontFamily: "'Inter', sans-serif", minWidth: 0 },
+  searchClearBtn: { background: "transparent", border: "none", color: "#b3a889", cursor: "pointer", padding: 2, display: "flex", flexShrink: 0 },
   chalkInput: { flex: 1, background: "transparent", border: "none", borderBottom: "1.5px dashed rgba(245,243,231,0.45)", color: "#F5F3E7", fontFamily: "'Kalam', cursive", fontSize: 14, padding: "4px 2px", outline: "none", minWidth: 0 },
   tabRow: { display: "flex", gap: 6, margin: "10px 2px 8px" },
   tabBtn: { flex: 1, padding: "9px 0", borderRadius: 9, border: "none", background: "rgba(31,61,43,0.85)", color: "#F5F3E7", fontFamily: "'Inter', sans-serif", fontWeight: 600, fontSize: 12.5, cursor: "pointer" },
@@ -1440,12 +2097,19 @@ const styles = {
   dateArrow: { background: "#fff", border: "1px solid #d8cfae", borderRadius: 8, width: 34, height: 34, display: "flex", alignItems: "center", justifyContent: "center", cursor: "pointer", color: "#4A3F2A", flexShrink: 0 },
   bulkMarkRow: { display: "flex", gap: 8, marginBottom: 14 },
   bulkMarkBtn: { flex: 1, background: "#fffdf7", border: "1.5px solid", borderRadius: 8, padding: "8px 6px", fontFamily: "'Inter', sans-serif", fontWeight: 600, fontSize: 12, cursor: "pointer" },
+  holidayMarkBtn: { width: "100%", background: "#fdf3de", border: "1.5px dashed #d9a441", borderRadius: 8, padding: "9px 10px", fontFamily: "'Inter', sans-serif", fontWeight: 600, fontSize: 12.5, color: "#8a5a1c", cursor: "pointer" },
+  holidayActiveRow: { display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8, background: "#fdf3de", border: "1px solid #e8c468", borderRadius: 8, padding: "8px 10px", marginBottom: 10 },
+  holidayBadge: { fontFamily: "'Inter', sans-serif", fontWeight: 700, fontSize: 12.5, color: "#8a5a1c" },
   dateBlock: { textAlign: "center", flex: 1 },
   dateInput: { fontFamily: "'IBM Plex Mono', monospace", fontSize: 13, border: "1px solid #d8cfae", borderRadius: 8, padding: "5px 8px", background: "#fff", color: "#2B2318" },
   dateLabel: { fontFamily: "'Kalam', cursive", fontSize: 13, color: "#6B4226", marginTop: 3 },
   addRow: { display: "flex", gap: 8, marginBottom: 16 },
   textInput: { border: "1px solid #d8cfae", borderRadius: 8, padding: "9px 10px", fontSize: 14, fontFamily: "'Inter', sans-serif", background: "#fffdf7", color: "#2B2318", outline: "none", minWidth: 0 },
-  selectInput: { flex: 1, border: "1px solid #d8cfae", borderRadius: 8, padding: "8px 10px", fontSize: 13, fontFamily: "'Inter', sans-serif", background: "#fffdf7", color: "#2B2318", outline: "none", minWidth: 0 },
+  selectInput: { flex: 1, border: "1px solid #d8cfae", borderRadius: 8, padding: "8px 10px", fontSize: 13, fontFamily: "'Inter', sans-serif", background: "#fffdf7", color: "#2B2318", outline: "none", minWidth: 0, display: "flex", alignItems: "center", justifyContent: "space-between", textAlign: "left", cursor: "pointer" },
+  dropdownPanel: { position: "absolute", top: "calc(100% + 4px)", left: 0, right: 0, zIndex: 20, background: "#fffdf7", border: "1px solid #d8cfae", borderRadius: 10, boxShadow: "0 8px 24px rgba(0,0,0,0.18)", overflow: "hidden" },
+  dropdownList: { maxHeight: 260, overflowY: "auto" },
+  dropdownOption: { padding: "10px 12px", fontSize: 13.5, fontFamily: "'Inter', sans-serif", color: "#2B2318", cursor: "pointer", borderBottom: "1px dashed #ece3c4" },
+  dropdownOptionActive: { background: "#f6f1de", fontWeight: 700, color: "#6B4226" },
   bulkArea: { width: "100%", border: "1px solid #d8cfae", borderRadius: 8, padding: "9px 10px", fontSize: 13, fontFamily: "'IBM Plex Mono', monospace", background: "#fffdf7", color: "#2B2318", outline: "none", resize: "vertical", marginBottom: 8 },
   bulkBtn: { background: "#E8C468", color: "#1F3D2B", border: "none", borderRadius: 8, padding: "9px 14px", fontWeight: 700, fontSize: 13, cursor: "pointer", fontFamily: "'Inter', sans-serif" },
   addBtn: { background: "#1F3D2B", color: "#F5F3E7", border: "none", borderRadius: 8, width: 38, display: "flex", alignItems: "center", justifyContent: "center", cursor: "pointer", flexShrink: 0 },
@@ -1454,8 +2118,33 @@ const styles = {
   rollBadge: { fontFamily: "'IBM Plex Mono', monospace", fontSize: 12, color: "#6B4226", width: 28, textAlign: "center", flexShrink: 0 },
   studentName: { flex: 1, fontSize: 14, fontWeight: 500, color: "#2B2318", minWidth: 0 },
   studentNameLine: { overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" },
+  studentNameLineWrap: { whiteSpace: "normal", overflowWrap: "anywhere", wordBreak: "break-word", lineHeight: 1.3 },
   inactiveTag: { marginLeft: 8, fontSize: 9.5, fontWeight: 700, color: "#8a8368", background: "#e3d9b8", padding: "2px 6px", borderRadius: 5, verticalAlign: "middle" },
   enrolledDate: { fontSize: 10.5, color: "#a89b78", fontFamily: "'IBM Plex Mono', monospace", marginTop: 1 },
+  studentTimeTag: { fontSize: 10.5, color: "#4C8C5B", fontFamily: "'IBM Plex Mono', monospace", marginTop: 2, fontWeight: 700 },
+  studentTimeTagLate: { fontSize: 10.5, color: "#C1503D", fontFamily: "'IBM Plex Mono', monospace", marginTop: 2, fontWeight: 700 },
+  studentSelfieThumb: { width: 20, height: 20, borderRadius: "50%", objectFit: "cover", border: "1.5px solid #E8C468", marginTop: 3, display: "block" },
+  modalOverlay: { position: "fixed", inset: 0, background: "rgba(31,24,15,0.72)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 1000, padding: 18 },
+  selfieCard: { background: "#FFFDF7", borderRadius: 14, padding: "18px 18px 16px", width: "100%", maxWidth: 340, boxShadow: "0 10px 30px rgba(0,0,0,0.35)" },
+  selfieTitle: { fontSize: 14.5, fontWeight: 700, color: "#2B2318", fontFamily: "'Inter', sans-serif", marginBottom: 4, textAlign: "center" },
+  selfieSub: { fontSize: 11, color: "#8a8368", fontFamily: "'Inter', sans-serif", textAlign: "center", marginBottom: 12, lineHeight: 1.4 },
+  selfieFrame: { position: "relative", width: "100%", aspectRatio: "1 / 1", borderRadius: 12, overflow: "hidden", background: "#20180f", display: "flex", alignItems: "center", justifyContent: "center" },
+  selfieVideo: { width: "100%", height: "100%", objectFit: "cover" },
+  selfieErrorBox: { color: "#f3c9c0", fontFamily: "'Inter', sans-serif", fontSize: 12, textAlign: "center", padding: 16, lineHeight: 1.5 },
+  selfieLoadingTag: { position: "absolute", bottom: 10, left: 0, right: 0, textAlign: "center", color: "#fdfaf0", fontFamily: "'Inter', sans-serif", fontSize: 11.5 },
+  selfieBtnRow: { display: "flex", gap: 8, marginTop: 14 },
+  selfieCancelBtn: { flex: "0 0 auto", background: "transparent", border: "1.5px solid #d8cfae", color: "#8a8368", borderRadius: 9, padding: "10px 14px", fontFamily: "'Inter', sans-serif", fontWeight: 700, fontSize: 12.5, cursor: "pointer" },
+  selfieCaptureBtn: { flex: 1, background: "#4C8C5B", border: "none", color: "#fdfaf0", borderRadius: 9, padding: "10px 14px", fontFamily: "'Inter', sans-serif", fontWeight: 700, fontSize: 12.5, cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center" },
+  teacherModeBtn: { width: "100%", background: "#fdf3de", border: "1.5px dashed #8a5a1c", borderRadius: 8, padding: "9px 10px", fontFamily: "'Inter', sans-serif", fontWeight: 700, fontSize: 12.5, color: "#8a5a1c", cursor: "pointer" },
+  teacherModeBtnActive: { background: "#4C8C5B", border: "1.5px solid #4C8C5B", color: "#fdfaf0" },
+  teacherModeHint: { fontSize: 11, color: "#8a8368", fontFamily: "'Inter', sans-serif", marginTop: 5, textAlign: "center" },
+  lateTimeRow: { display: "flex", alignItems: "center", justifyContent: "center", gap: 6, marginTop: 8, background: "#fdf3de", border: "1px dashed #e8c468", borderRadius: 8, padding: "6px 10px" },
+  lateTimeLabel: { fontSize: 11, color: "#8a5a1c", fontFamily: "'Inter', sans-serif", fontWeight: 600 },
+  lateTimeInput: { border: "1px solid #d8cfae", borderRadius: 6, padding: "3px 6px", fontSize: 12, fontFamily: "'IBM Plex Mono', monospace", background: "#fff", color: "#2B2318", outline: "none" },
+  lateTimeClearBtn: { border: "none", background: "transparent", color: "#8a5a1c", cursor: "pointer", padding: 2, display: "flex", alignItems: "center" },
+  lateTimeSaveBtn: { border: "none", background: "#4C8C5B", color: "#fdfaf0", cursor: "pointer", borderRadius: 5, padding: "3px 6px", display: "flex", alignItems: "center" },
+  lateTimeSavedRow: { display: "flex", alignItems: "center", justifyContent: "center", gap: 8, marginTop: 8, background: "#fdf3de", border: "1px dashed #e8c468", borderRadius: 8, padding: "6px 10px" },
+  lateTimeEditLink: { border: "none", background: "transparent", color: "#4A6FA5", fontFamily: "'Inter', sans-serif", fontSize: 11, fontWeight: 700, cursor: "pointer", textDecoration: "underline", padding: 0 },
   statusGroup: { display: "flex", gap: 5, flexShrink: 0 },
   statusBtn: { width: 28, height: 28, borderRadius: "50%", border: "1.5px solid", fontFamily: "'Kalam', cursive", fontWeight: 700, fontSize: 13, cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", transition: "background 0.15s, color 0.15s" },
   deleteBtn: { background: "transparent", border: "none", color: "#b3a889", cursor: "pointer", padding: 4, flexShrink: 0 },
@@ -1472,14 +2161,25 @@ const styles = {
   printOnlyMainTitle: { fontFamily: "'Inter', sans-serif", fontSize: 20, fontWeight: 700, color: "#111", marginBottom: 6 },
   printOnlyMeta: { display: "flex", gap: 16, flexWrap: "wrap", fontSize: 12, color: "#333", fontFamily: "'Inter', sans-serif" },
   pdfHint: { fontSize: 11, color: "#8a8368", textAlign: "center", marginTop: 8, fontFamily: "'Inter', sans-serif" },
+  landscapeWarn: { fontSize: 11.5, color: "#8a5a1c", textAlign: "center", marginTop: 8, fontFamily: "'Inter', sans-serif", background: "#fdf3de", border: "1px solid #e8c468", borderRadius: 8, padding: "8px 10px", lineHeight: 1.45 },
   reportTableWrap: { background: "#fffdf7", border: "1px solid #e3d9b8", borderRadius: 10, overflow: "auto" },
   gridTableWrap: { background: "#fffdf7", border: "1px solid #e3d9b8", borderRadius: 10, overflow: "auto", maxWidth: "100%" },
   gridTable: { borderCollapse: "collapse", fontFamily: "'Inter', sans-serif" },
   gridThName: { position: "sticky", left: 0, background: "#F2ECD8", fontSize: 10.5, fontWeight: 700, color: "#6B4226", padding: "7px 6px", textAlign: "center", borderBottom: "1.5px solid #e3d9b8", borderRight: "1px solid #e3d9b8", whiteSpace: "nowrap", zIndex: 1 },
-  gridThDay: { fontSize: 10, fontWeight: 700, color: "#6B4226", padding: "7px 4px", textAlign: "center", borderBottom: "1.5px solid #e3d9b8", minWidth: 22, whiteSpace: "nowrap" },
+  gridThDay: { fontSize: 10, fontWeight: 700, color: "#6B4226", padding: "8px 4px", textAlign: "center", borderBottom: "1.5px solid #e3d9b8", borderRight: "1px solid #e3d9b8", minWidth: 40, whiteSpace: "nowrap" },
+  gridThHoliday: { background: "#fdf3de", color: "#8a5a1c" },
   gridThTotal: { fontSize: 10, fontWeight: 700, color: "#6B4226", padding: "7px 6px", textAlign: "center", borderBottom: "1.5px solid #e3d9b8", background: "#F2ECD8", whiteSpace: "nowrap" },
   gridTdName: { position: "sticky", left: 0, background: "#fffdf7", fontSize: 11.5, padding: "6px 6px", textAlign: "center", borderBottom: "1px dashed #e3d9b8", borderRight: "1px solid #e3d9b8", color: "#2B2318", whiteSpace: "nowrap" },
-  gridTdDay: { fontSize: 11, padding: "6px 4px", textAlign: "center", borderBottom: "1px dashed #e3d9b8", minWidth: 22 },
+  gridNameSummary: { display: "flex", gap: 6, marginTop: 2 },
+  gridNameSummaryLate: { fontSize: 9.5, fontWeight: 700, color: "#C1503D", fontFamily: "'IBM Plex Mono', monospace" },
+  gridNameSummaryAbsent: { fontSize: 9.5, fontWeight: 700, color: "#B23A3A", fontFamily: "'IBM Plex Mono', monospace" },
+  gridTdDay: { fontSize: 11, padding: "6px 2px 5px", textAlign: "center", verticalAlign: "middle", borderBottom: "1px dashed #e3d9b8", borderRight: "1px solid #e3d9b8", minWidth: 40, maxWidth: 40, height: 46, overflow: "hidden" },
+  gridTdTime: { fontSize: 7.5, color: "#4C8C5B", fontFamily: "'IBM Plex Mono', monospace", fontWeight: 700, marginTop: 2, whiteSpace: "nowrap", overflow: "hidden", lineHeight: 1.1 },
+  gridTdTimeVertical: { writingMode: "vertical-rl", textOrientation: "mixed", margin: "0 auto", fontSize: 9, color: "#4C8C5B", fontFamily: "'IBM Plex Mono', monospace", fontWeight: 700, whiteSpace: "nowrap", lineHeight: 1.1, letterSpacing: 0.5 },
+  gridTdHoliday: { padding: "4px 3px", background: "#fdf3de", textAlign: "center", verticalAlign: "middle", borderLeft: "1px solid #e8c468", borderRight: "1px solid #e8c468" },
+  gridHolidayCellWrap: { display: "block" },
+  gridHolidayDateTag: { fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, fontWeight: 800, color: "#6B4226", borderBottom: "1px solid #e8c468", paddingBottom: 3, marginBottom: 6, width: "100%", textAlign: "center" },
+  gridHolidayLabel: { writingMode: "vertical-rl", textOrientation: "mixed", margin: "0 auto", fontWeight: 700, fontSize: 10.5, color: "#8a5a1c", letterSpacing: 0.5, whiteSpace: "nowrap" },
   gridTdTotal: { fontSize: 11.5, fontWeight: 700, padding: "6px 6px", textAlign: "center", borderBottom: "1px dashed #e3d9b8", background: "#F2ECD8", color: "#2B2318" },
   reportTable: { width: "100%", borderCollapse: "collapse", fontFamily: "'Inter', sans-serif" },
   th: { fontSize: 11, fontWeight: 700, color: "#6B4226", padding: "8px 6px", textAlign: "center", borderBottom: "1.5px solid #e3d9b8", textTransform: "uppercase", letterSpacing: 0.3, whiteSpace: "nowrap" },
@@ -1500,78 +2200,12 @@ const styles = {
    SUPABASE AUTH + CLOUD STORAGE
    ============================================================ */
 
-const SB_URL_KEY = "attendance_sb_url";
-const SB_ANON_KEY = "attendance_sb_anon_key";
-
-// Agar ye do values yahan bhar di jaayein, to app seedha isi Supabase project se
-// connect ho jaayegi — kisi bhi browser/device par Setup screen nahi dikhega,
-// seedha Login/Sign-up aayega. Anon key public/client-safe hai; data ki security
-// Row Level Security policy se hoti hai (jo SETUP_SQL me set hoti hai).
-const EMBEDDED_SUPABASE_URL = "https://rwktftprifzqbylicalp.supabase.co";
-const EMBEDDED_SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InJ3a3RmdHByaWZ6cWJ5bGljYWxwIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODYwOTA4NjUsImV4cCI6MjEwMTY2Njg2NX0.S1nilVss6DxzEd6TxK_bsnLtlWAhNxey02VVMdlmS_E";
-
-const SETUP_SQL = `create table if not exists app_storage (
-  user_id uuid references auth.users(id) on delete cascade not null,
-  key text not null,
-  value text,
-  updated_at timestamptz default now(),
-  primary key (user_id, key)
-);
-
-alter table app_storage enable row level security;
-
--- Class Teacher login system (owner sets up each teacher's login;
--- role decides admin vs class-teacher view — same pattern as the fee register app).
-create table if not exists profiles (
-  id uuid primary key references auth.users(id) on delete cascade,
-  email text,
-  role text not null check (role in ('admin','teacher')),
-  created_at timestamptz default now()
-);
-
-alter table profiles enable row level security;
-
--- Security definer function to check "is the current user an admin" without
--- causing infinite RLS recursion when used inside profiles' own policies.
-create or replace function public.is_admin()
-returns boolean
-language sql
-security definer
-set search_path = public
-as $$
-  select exists (
-    select 1 from profiles where id = auth.uid() and role = 'admin'
-  );
-$$;
-
--- Admin can fully view/edit ANY teacher's class data; everyone else only their own.
-create policy "Users manage own data, admin manages all"
-on app_storage for all
-using (auth.uid() = user_id or public.is_admin())
-with check (auth.uid() = user_id or public.is_admin());
-
-create policy "Read own profile"
-on profiles for select
-using (auth.uid() = id);
-
-create policy "Admin reads all profiles"
-on profiles for select
-using (public.is_admin());
-
-create policy "Admin inserts teacher profiles"
-on profiles for insert
-with check (public.is_admin());
-
-create policy "Admin deletes teacher profiles"
-on profiles for delete
-using (public.is_admin());
-
--- The very first person to ever log in (jab profiles table khali ho) apne aap
--- 'admin' ban jaata hai — is se pehla owner account manually SQL se banane
--- ki zaroorat nahi padti. Uske baad admin hi teacher logins bana sakta hai.
-create policy "Bootstrap first admin"
-on profiles for insert
-with check (auth.uid() = id and not exists (select 1 from profiles));`;
+// Ye do values bhar di jaayein to app seedha isi Supabase project se
+// connect ho jaayegi — seedha Login/Sign-up screen aayega. Anon key
+// public/client-safe hai; data ki security Row Level Security policy
+// se hoti hai (supabase_setup.sql project ke SQL Editor me chalao).
+const EMBEDDED_SUPABASE_URL = "https://lccfkksasrhvvtgknqhs.supabase.co";
+const EMBEDDED_SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImxjY2Zra3Nhc3JodnZ0Z2tucWhzIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODY0MzkzODksImV4cCI6MjEwMjAxNTM4OX0.K6aUFls10jlfIuvPU1Br__gKXdOzOKfklWMT6zZTNVM";
 
 function makeSupabaseStorage(client, userId) {
   return {
@@ -1620,66 +2254,6 @@ function makeSupabaseStorage(client, userId) {
       }
     },
   };
-}
-
-function SetupScreen({ onDone }) {
-  const [url, setUrl] = useState("");
-  const [anonKey, setAnonKey] = useState("");
-  const [copied, setCopied] = useState(false);
-  const [err, setErr] = useState("");
-
-  const copySql = async () => {
-    try {
-      await navigator.clipboard.writeText(SETUP_SQL);
-      setCopied(true);
-      setTimeout(() => setCopied(false), 1600);
-    } catch (e) {}
-  };
-
-  const submit = () => {
-    const u = url.trim();
-    const k = anonKey.trim();
-    if (!u || !k) {
-      setErr("Dono fields bharo — Project URL aur Anon Public Key.");
-      return;
-    }
-    if (!/^https:\/\/.+\.supabase\.co\/?$/.test(u)) {
-      setErr("URL kuch aisa hona chahiye: https://xxxxx.supabase.co");
-      return;
-    }
-    localStorage.setItem(SB_URL_KEY, u);
-    localStorage.setItem(SB_ANON_KEY, k);
-    onDone(u, k);
-  };
-
-  return (
-    <div style={authStyles.wrap}>
-      <div style={authStyles.card}>
-        <div style={authStyles.title}>Supabase Setup</div>
-        <div style={authStyles.subtitle}>Ek baar ka setup — apna free Supabase project connect karo.</div>
-
-        <div style={authStyles.stepBlock}>
-          <div style={authStyles.stepTitle}>1. Table banao</div>
-          <div style={authStyles.stepText}>
-            <a href="https://supabase.com" target="_blank" rel="noopener noreferrer" style={authStyles.link}>supabase.com</a> par free project banao, phir SQL Editor me ye query chalao:
-          </div>
-          <pre style={authStyles.sqlBox}>{SETUP_SQL}</pre>
-          <button style={authStyles.smallBtn} onClick={copySql}>{copied ? "Copied ✓" : "SQL Copy karo"}</button>
-        </div>
-
-        <div style={authStyles.stepBlock}>
-          <div style={authStyles.stepTitle}>2. Keys paste karo</div>
-          <div style={authStyles.stepText}>Project Settings → API me se ye do cheezein milengi:</div>
-          <input style={authStyles.input} placeholder="Project URL (https://xxxx.supabase.co)" value={url} onChange={(e) => setUrl(e.target.value)} />
-          <input style={authStyles.input} placeholder="Anon public key" value={anonKey} onChange={(e) => setAnonKey(e.target.value)} />
-        </div>
-
-        {err && <div style={authStyles.error}>{err}</div>}
-        <button style={authStyles.primaryBtn} onClick={submit}>Continue</button>
-        <div style={authStyles.footNote}>Ye keys is browser me hi save hoti hain, kahin bheji nahi jaati.</div>
-      </div>
-    </div>
-  );
 }
 
 function AuthScreen({ client, onAuthed, blockedError }) {
@@ -1736,6 +2310,38 @@ function AuthScreen({ client, onAuthed, blockedError }) {
   );
 }
 
+/* ---------------- catches crashes mid-session so the app never goes fully blank ---------------- */
+class ErrorBoundary extends React.Component {
+  constructor(props) {
+    super(props);
+    this.state = { error: null };
+  }
+  static getDerivedStateFromError(error) {
+    return { error };
+  }
+  componentDidCatch(error, info) {
+    console.error("App crashed:", error, info && info.componentStack);
+  }
+  render() {
+    if (this.state.error) {
+      const msg = (this.state.error && this.state.error.message) ? this.state.error.message : String(this.state.error);
+      return (
+        <div style={{ maxWidth: 640, margin: "24px auto", padding: "18px 20px", background: "#fdece7", border: "1px solid #f0cfc5", borderRadius: 10, color: "#7a2f20", fontFamily: "'Inter', sans-serif" }}>
+          <div style={{ fontWeight: 700, fontSize: 14, marginBottom: 8 }}>Kuch gadbad ho gayi — app crash ho gaya.</div>
+          <div style={{ whiteSpace: "pre-wrap", fontSize: 12.5, fontFamily: "'IBM Plex Mono', monospace", marginBottom: 14, lineHeight: 1.5 }}>{msg}</div>
+          <button
+            onClick={() => window.location.reload()}
+            style={{ background: "#E8C468", color: "#1F3D2B", border: "none", borderRadius: 7, padding: "9px 16px", fontWeight: 700, fontSize: 12.5, cursor: "pointer", fontFamily: "'Inter', sans-serif" }}
+          >
+            Reload App
+          </button>
+        </div>
+      );
+    }
+    return this.props.children;
+  }
+}
+
 function Root() {
   const [sbConfig, setSbConfig] = useState(null);
   const [client, setClient] = useState(null);
@@ -1750,12 +2356,7 @@ function Root() {
   useEffect(() => {
     if (EMBEDDED_SUPABASE_URL && EMBEDDED_SUPABASE_ANON_KEY) {
       setSbConfig({ url: EMBEDDED_SUPABASE_URL, anonKey: EMBEDDED_SUPABASE_ANON_KEY });
-      setCheckingConfig(false);
-      return;
     }
-    const u = localStorage.getItem(SB_URL_KEY);
-    const k = localStorage.getItem(SB_ANON_KEY);
-    if (u && k) setSbConfig({ url: u, anonKey: k });
     setCheckingConfig(false);
   }, []);
 
@@ -1831,7 +2432,7 @@ function Root() {
       }
       {
         const detail = insertErr ? (insertErr.message + (insertErr.code ? " (code: " + insertErr.code + ")" : "")) : "Row insert nahi hui.";
-        setAuthBlockedMsg("Ye account admin dwara authorize nahi hai. Apne school admin se apna Class Teacher login banwao. [Debug: " + detail + "]");
+        setAuthBlockedMsg("Ye account admin dwara authorize nahi hai. Apne school admin se apna Entities Custodian login banwao. [Debug: " + detail + "]");
         await client.auth.signOut();
         setProfile(null);
         setSession(null);
@@ -1891,7 +2492,14 @@ function Root() {
   if (checkingConfig) return null;
 
   if (!sbConfig) {
-    return <SetupScreen onDone={(url, anonKey) => setSbConfig({ url, anonKey })} />;
+    return (
+      <div style={authStyles.wrap}>
+        <div style={authStyles.card}>
+          <div style={authStyles.title}>Supabase Not Configured</div>
+          <div style={authStyles.subtitle}>App abhi kisi Supabase project se connect nahi hai. Developer ko URL aur anon key set karne hain.</div>
+        </div>
+      </div>
+    );
   }
 
   if (!client || session === undefined) return null;
@@ -1915,7 +2523,7 @@ function Root() {
   const userLabel = viewingTeacher
     ? `Admin: ${session.user.email}`
     : isTeacher
-    ? `Class Teacher: ${session.user.email}`
+    ? `Entities Custodian: ${session.user.email}`
     : session.user.email;
 
   return (
@@ -1964,13 +2572,42 @@ const authStyles = {
 
 try {
   const root = ReactDOM.createRoot(document.getElementById("root"));
-  root.render(<Root />);
+  root.render(<ErrorBoundary><Root /></ErrorBoundary>);
 } catch (err) {
   const box = document.getElementById("boot-error");
   box.style.display = "block";
   box.textContent = "App render error: " + (err && err.message ? err.message : err);
   console.error(err);
 }
+</script>
+
+<script>
+  // Manually transform + run the app source (instead of Babel's silent auto-scan of
+  // type="text/babel" tags) so that ANY build/syntax error is guaranteed to surface
+  // in the on-screen boot-error box, not just get swallowed into the console.
+  (function () {
+    const sourceEl = document.getElementById("app-source");
+    const src = sourceEl.textContent;
+    function showBootError(label, err) {
+      const box = document.getElementById("boot-error");
+      if (!box) return;
+      box.style.display = "block";
+      let detail = err && err.message ? err.message : String(err);
+      if (err && err.loc) detail += "\n(line " + err.loc.line + ", col " + err.loc.column + ")";
+      box.textContent = label + ": " + detail;
+      console.error(label, err);
+    }
+    try {
+      const { code } = Babel.transform(src, { presets: ["react"], filename: "app-source.jsx" });
+      try {
+        (0, eval)(code);
+      } catch (runErr) {
+        showBootError("App run error", runErr);
+      }
+    } catch (buildErr) {
+      showBootError("Build error", buildErr);
+    }
+  })();
 </script>
 <script>
   if ("serviceWorker" in navigator) {
