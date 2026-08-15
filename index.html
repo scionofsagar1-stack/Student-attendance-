@@ -2601,21 +2601,72 @@ function SelfCheckinScreen({ client }) {
   const [code, setCode] = useState(initialCode);
   const [name, setName] = useState("");
   const [pin, setPin] = useState("");
-  const [stage, setStage] = useState(initialCode ? "form" : "code"); // code | form | success | error
+  // code | form | geochecking | selfie | submitting | success | error
+  const [stage, setStage] = useState(initialCode ? "form" : "code");
   const [message, setMessage] = useState("");
   const [busy, setBusy] = useState(false);
+  const [classInfo, setClassInfo] = useState(null); // { found, className, geoCenter, geoRadius }
+  const [coords, setCoords] = useState(null); // { lat, lng } once geo-checked ok
 
   const goBack = () => { window.location.href = window.location.pathname; };
+
+  const loadClassInfo = async (clean) => {
+    try {
+      const { data, error } = await client.rpc("get_checkin_class_info", { p_code: clean });
+      if (!error && data) setClassInfo(data);
+    } catch (e) {
+      // agar ye fail ho jaaye to bhi form dikhta rahega, geo-check bas skip ho jayega
+    }
+  };
+
+  useEffect(() => {
+    if (initialCode) loadClassInfo(initialCode);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   const submitCode = () => {
     const clean = code.trim().toUpperCase();
     if (!clean) return;
     setCode(clean);
     setStage("form");
+    loadClassInfo(clean);
   };
 
-  const submitAttendance = async () => {
+  // "Present maaro" dabane par: pehle location check (agar class ke liye geo-fence set hai), fir selfie
+  const startCheckin = async () => {
     if (!name.trim() || pin.length !== 4) return;
+    setMessage("");
+
+    const needsGeo = classInfo && classInfo.found && classInfo.geoCenter && classInfo.geoCenter.lat != null;
+
+    if (needsGeo) {
+      setStage("geochecking");
+      try {
+        const pos = await getCurrentPositionAsync();
+        const dist = distanceMeters(
+          pos.coords.latitude, pos.coords.longitude,
+          classInfo.geoCenter.lat, classInfo.geoCenter.lng
+        );
+        if (dist > (classInfo.geoRadius || 150)) {
+          setMessage("Aap classroom area ke bahar ho — paas jaake dobara try karo.");
+          setStage("error");
+          return;
+        }
+        setCoords({ lat: pos.coords.latitude, lng: pos.coords.longitude });
+      } catch (err) {
+        setMessage("Location access nahi mil paaya — permission on karke dobara try karo.");
+        setStage("error");
+        return;
+      }
+    } else {
+      setCoords(null);
+    }
+
+    setStage("selfie");
+  };
+
+  const finishCheckin = async (selfieDataUrl) => {
+    setStage("submitting");
     setBusy(true);
     setMessage("");
     try {
@@ -2623,6 +2674,8 @@ function SelfCheckinScreen({ client }) {
       const timeStr = new Date().toLocaleTimeString("en-IN", { hour: "2-digit", minute: "2-digit", hour12: true });
       const { data, error } = await client.rpc("self_checkin", {
         p_code: code, p_name: name.trim(), p_pin: pin, p_date: dateStr, p_time: timeStr,
+        p_lat: coords ? coords.lat : null, p_lng: coords ? coords.lng : null,
+        p_selfie: selfieDataUrl || null,
       });
       if (error) {
         setMessage("Kuch gadbad ho gayi — dobara try karo. [" + error.message + "]");
@@ -2648,6 +2701,9 @@ function SelfCheckinScreen({ client }) {
         <div style={authStyles.subtitle}>
           {stage === "code" && "Class ka code daalo (jo aapke custodian ne diya hai)."}
           {stage === "form" && "Apna poora naam aur 4-digit PIN daalo."}
+          {stage === "geochecking" && "Location check ho raha hai…"}
+          {stage === "selfie" && "Ab selfie proof do."}
+          {stage === "submitting" && "Attendance lagayi ja rahi hai…"}
           {stage === "success" && "Ho gaya!"}
           {stage === "error" && "Nahi ho paaya."}
         </div>
@@ -2663,15 +2719,26 @@ function SelfCheckinScreen({ client }) {
         {stage === "form" && (
           <>
             <input style={authStyles.input} placeholder="Apna poora naam" value={name}
-              onChange={(e) => setName(e.target.value)} onKeyDown={(e) => e.key === "Enter" && pin.length === 4 && submitAttendance()} autoFocus />
+              onChange={(e) => setName(e.target.value)} onKeyDown={(e) => e.key === "Enter" && pin.length === 4 && startCheckin()} autoFocus />
             <input style={{ ...authStyles.input, textAlign: "center", letterSpacing: 8 }} type="password" inputMode="numeric" maxLength={4}
               placeholder="PIN" value={pin} onChange={(e) => setPin(e.target.value.replace(/\D/g, "").slice(0, 4))}
-              onKeyDown={(e) => e.key === "Enter" && submitAttendance()} />
+              onKeyDown={(e) => e.key === "Enter" && startCheckin()} />
+            {classInfo && classInfo.found && classInfo.geoCenter && classInfo.geoCenter.lat != null && (
+              <div style={authStyles.info}><MapPin size={13} style={{ verticalAlign: -2, marginRight: 5 }} />Location check hoga — paas hi rehna.</div>
+            )}
             {message && <div style={authStyles.error}>{message}</div>}
-            <button style={authStyles.primaryBtn} onClick={submitAttendance} disabled={busy || !name.trim() || pin.length !== 4}>
-              {busy ? "Please wait…" : "Present maaro"}
+            <button style={authStyles.primaryBtn} onClick={startCheckin} disabled={busy || !name.trim() || pin.length !== 4}>
+              Present maaro
             </button>
           </>
+        )}
+
+        {stage === "geochecking" && (
+          <div style={authStyles.info}>📍 Aapki location check ki ja rahi hai, thoda ruko…</div>
+        )}
+
+        {stage === "submitting" && (
+          <div style={authStyles.info}>⏳ Please wait…</div>
         )}
 
         {stage === "success" && (
@@ -2686,6 +2753,14 @@ function SelfCheckinScreen({ client }) {
 
         <a href="#" onClick={(e) => { e.preventDefault(); goBack(); }} style={authStyles.checkinLink}>← Wapas login par jao</a>
       </div>
+
+      {stage === "selfie" && (
+        <SelfieCaptureModal
+          studentName={name.trim() || "Aapki"}
+          onCapture={(dataUrl) => finishCheckin(dataUrl)}
+          onCancel={() => setStage("form")}
+        />
+      )}
     </div>
   );
 }
