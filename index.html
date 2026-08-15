@@ -462,6 +462,7 @@ function AttendanceApp({ userEmail, onLogout, isGuest, isAdmin, client, signupCl
   const [teacherMode, setTeacherMode] = useState(false);
   const [lateTimeEditing, setLateTimeEditing] = useState(false);
   const [selfieTarget, setSelfieTarget] = useState(null);
+  const [viewingSelfie, setViewingSelfie] = useState(null);
 
   const [newRoll, setNewRoll] = useState("");
   const [newName, setNewName] = useState("");
@@ -1509,7 +1510,14 @@ function AttendanceApp({ userEmail, onLogout, isGuest, isAdmin, client, signupCl
                             );
                           })()}
                           {teacherMode && st === "P" && attendanceSelfies[selectedDate] && attendanceSelfies[selectedDate][s.id] && (
-                            <img src={attendanceSelfies[selectedDate][s.id]} alt="Selfie proof" style={styles.studentSelfieThumb} />
+                            <button
+                              type="button"
+                              onClick={() => setViewingSelfie({ url: attendanceSelfies[selectedDate][s.id], name: s.name, date: selectedDate, time: (attendanceTimes[selectedDate] && attendanceTimes[selectedDate][s.id]) || null })}
+                              style={styles.studentSelfieThumbBtn}
+                              aria-label={`${s.name} ki selfie dekho`}
+                            >
+                              <img src={attendanceSelfies[selectedDate][s.id]} alt="Selfie proof" style={styles.studentSelfieThumb} />
+                            </button>
                           )}
                         </div>
                         <div style={styles.statusGroup}>
@@ -2042,6 +2050,19 @@ function AttendanceApp({ userEmail, onLogout, isGuest, isAdmin, client, signupCl
           onCancel={() => setSelfieTarget(null)}
         />
       )}
+
+      {viewingSelfie && (
+        <div style={styles.modalOverlay} className="no-print" onClick={() => setViewingSelfie(null)}>
+          <div style={styles.selfieViewCard} onClick={(e) => e.stopPropagation()}>
+            <img src={viewingSelfie.url} alt={`${viewingSelfie.name} selfie`} style={styles.selfieViewImg} />
+            <div style={styles.selfieViewMeta}>
+              <div style={styles.selfieViewName}>{viewingSelfie.name}</div>
+              <div style={styles.selfieViewSub}>{formatDateLabel(viewingSelfie.date)}{viewingSelfie.time ? ` · ${viewingSelfie.time}` : ""}</div>
+            </div>
+            <button style={styles.selfieViewCloseBtn} onClick={() => setViewingSelfie(null)}>Band karo</button>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
@@ -2123,7 +2144,14 @@ const styles = {
   enrolledDate: { fontSize: 10.5, color: "#a89b78", fontFamily: "'IBM Plex Mono', monospace", marginTop: 1 },
   studentTimeTag: { fontSize: 10.5, color: "#4C8C5B", fontFamily: "'IBM Plex Mono', monospace", marginTop: 2, fontWeight: 700 },
   studentTimeTagLate: { fontSize: 10.5, color: "#C1503D", fontFamily: "'IBM Plex Mono', monospace", marginTop: 2, fontWeight: 700 },
-  studentSelfieThumb: { width: 20, height: 20, borderRadius: "50%", objectFit: "cover", border: "1.5px solid #E8C468", marginTop: 3, display: "block" },
+  studentSelfieThumb: { width: 20, height: 20, borderRadius: "50%", objectFit: "cover", border: "1.5px solid #E8C468", display: "block" },
+  studentSelfieThumbBtn: { border: "none", background: "transparent", padding: 0, marginTop: 3, cursor: "pointer", lineHeight: 0 },
+  selfieViewCard: { background: "#FFFDF7", borderRadius: 14, padding: "16px 16px 14px", width: "100%", maxWidth: 320, boxShadow: "0 10px 30px rgba(0,0,0,0.35)" },
+  selfieViewImg: { width: "100%", aspectRatio: "1 / 1", objectFit: "cover", borderRadius: 12, display: "block", background: "#20180f" },
+  selfieViewMeta: { textAlign: "center", marginTop: 10, marginBottom: 12 },
+  selfieViewName: { fontSize: 14, fontWeight: 700, color: "#2B2318", fontFamily: "'Inter', sans-serif" },
+  selfieViewSub: { fontSize: 11.5, color: "#8a8368", fontFamily: "'IBM Plex Mono', monospace", marginTop: 2 },
+  selfieViewCloseBtn: { width: "100%", background: "#4C8C5B", border: "none", color: "#fdfaf0", borderRadius: 9, padding: "10px 14px", fontFamily: "'Inter', sans-serif", fontWeight: 700, fontSize: 12.5, cursor: "pointer" },
   modalOverlay: { position: "fixed", inset: 0, background: "rgba(31,24,15,0.72)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 1000, padding: 18 },
   selfieCard: { background: "#FFFDF7", borderRadius: 14, padding: "18px 18px 16px", width: "100%", maxWidth: 340, boxShadow: "0 10px 30px rgba(0,0,0,0.35)" },
   selfieTitle: { fontSize: 14.5, fontWeight: 700, color: "#2B2318", fontFamily: "'Inter', sans-serif", marginBottom: 4, textAlign: "center" },
