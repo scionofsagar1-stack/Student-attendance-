@@ -1,9 +1,9 @@
 <!DOCTYPE html>
-<html lang="hi">
+<html lang="en">
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-<title>उपस्थिति रजिस्टर — Attendance Register</title>
+<title>Attendance Register</title>
 <link rel="manifest" href="manifest.json" />
 <meta name="theme-color" content="#1F3D2B" />
 <link rel="apple-touch-icon" href="icons/apple-touch-icon.png" />
@@ -16,6 +16,8 @@
 <script crossorigin="anonymous" src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.3.1/umd/react-dom.production.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.24.7/babel.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.js"></script>
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
 <style>
   html, body { margin: 0; padding: 0; }
   #root:empty::before {
@@ -53,7 +55,7 @@
       box.style.display = "block";
       box.textContent = "Page load error: " + (e.message || e.error) +
         (e.filename ? "\n(" + e.filename + ":" + e.lineno + ")" : "") +
-        "\n\nAgar ye CDN se related error hai to internet connection check karo, ya browser console (F12) khol kar poora error dekho.";
+        "\n\nIf this is a CDN-related error, check your internet connection, or open the browser console (F12) to see the full error.";
     }
   });
 
@@ -185,11 +187,6 @@ const MapPin = makeIcon(<>
   <path d="M20 10c0 6-8 12-8 12s-8-6-8-12a8 8 0 0 1 16 0z" />
   <circle cx="12" cy="10" r="3" />
 </>);
-const Link2 = makeIcon(<>
-  <path d="M9 17H7A5 5 0 0 1 7 7h2" />
-  <path d="M15 7h2a5 5 0 1 1 0 10h-2" />
-  <line x1="8" y1="12" x2="16" y2="12" />
-</>);
 
 /* ---------------- app logic (ported from the original .jsx) ---------------- */
 
@@ -211,12 +208,6 @@ const todayISO = () => {
 const currentMonthStr = () => todayISO().slice(0, 7);
 const currentYearStr = () => todayISO().slice(0, 4);
 const newId = (p) => `${p}_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
-const randomCheckinCode = () => {
-  const chars = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"; // no 0/O/1/I confusion
-  let out = "";
-  for (let i = 0; i < 6; i++) out += chars[Math.floor(Math.random() * chars.length)];
-  return out;
-};
 // "08:19 pm" -> "8:19p" — compact form so it fits inside a narrow grid cell without overlapping neighbours
 const shortTime = (t) => (t ? t.replace(/^0/, "").replace(/\s?(am|pm|AM|PM)$/, (m) => m.trim()[0].toLowerCase()) : t);
 const fullTimeNoAmPm = (t) => (t ? t.replace(/\s?(am|pm|AM|PM)$/, "").trim() : t);
@@ -241,7 +232,7 @@ const pruneOldSelfies = (selfies) => {
   return result;
 };
 
-const blankClass = (name = "") => ({ id: newId("c"), className: name, teacher: "", students: [], attendance: {}, holidays: {}, attendanceTimes: {}, attendanceSelfies: {}, lateTime: "", geoCenter: null, geoRadius: 150, checkinCode: "" });
+const blankClass = (name = "") => ({ id: newId("c"), className: name, teacher: "", students: [], attendance: {}, holidays: {}, attendanceTimes: {}, attendanceSelfies: {}, lateTime: "", geoCenter: null, geoRadius: 150, selfieOn: true, locationOn: true });
 const normalizeClasses = (list) =>
   (list || []).map((c) => ({
     ...c,
@@ -252,7 +243,8 @@ const normalizeClasses = (list) =>
     lateTime: c.lateTime || "",
     geoCenter: c.geoCenter || null,
     geoRadius: c.geoRadius || 150,
-    checkinCode: c.checkinCode || "",
+    selfieOn: c.selfieOn !== false,
+    locationOn: c.locationOn !== false,
   }));
 
 // distance (meters) between two lat/lng points
@@ -293,7 +285,7 @@ const isLateStamp = (stampedTime, lateTimeStr) => {
 };
 
 /* ---------------- searchable student picker (replaces plain <select> where lists can get long) ---------------- */
-function StudentSearchSelect({ students, value, onChange, placeholder = "Koi candidate nahi", style }) {
+function StudentSearchSelect({ students, value, onChange, placeholder = "No candidates", style }) {
   const [open, setOpen] = useState(false);
   const [q, setQ] = useState("");
   const wrapRef = useRef(null);
@@ -333,7 +325,7 @@ function StudentSearchSelect({ students, value, onChange, placeholder = "Koi can
         onClick={() => setOpen((v) => !v)}
       >
         <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-          {selected ? `${selected.roll} — ${selected.name}` : (students.length === 0 ? placeholder : "Candidate chuno")}
+          {selected ? `${selected.roll} — ${selected.name}` : (students.length === 0 ? placeholder : "Choose candidate")}
         </span>
         <ChevronRight size={14} style={{ transform: "rotate(90deg)", flexShrink: 0, marginLeft: 6 }} />
       </button>
@@ -345,7 +337,7 @@ function StudentSearchSelect({ students, value, onChange, placeholder = "Koi can
             <input
               ref={inputRef}
               style={styles.searchInput}
-              placeholder="Naam ya roll se search karo…"
+              placeholder="Search by name or roll…"
               value={q}
               onChange={(e) => setQ(e.target.value)}
             />
@@ -355,7 +347,7 @@ function StudentSearchSelect({ students, value, onChange, placeholder = "Koi can
           </div>
           <div style={styles.dropdownList}>
             {filtered.length === 0 ? (
-              <div style={{ ...styles.empty, padding: "14px 12px" }}>"{q}" se koi candidate nahi mila.</div>
+              <div style={{ ...styles.empty, padding: "14px 12px" }}>"{q}" matched no candidates.</div>
             ) : (
               filtered.map((s) => (
                 <div
@@ -372,6 +364,42 @@ function StudentSearchSelect({ students, value, onChange, placeholder = "Koi can
       )}
     </div>
   );
+}
+
+/* ---------------- small embedded map (Leaflet/OpenStreetMap) to preview the saved geofence ---------------- */
+function GeoFenceMap({ lat, lng, radius }) {
+  const mapRef = useRef(null);
+  const containerRef = useRef(null);
+  const markerRef = useRef(null);
+  const circleRef = useRef(null);
+
+  useEffect(() => {
+    if (!containerRef.current || typeof L === "undefined") return;
+    if (!mapRef.current) {
+      mapRef.current = L.map(containerRef.current, { attributionControl: true, zoomControl: true }).setView([lat, lng], 17);
+      L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
+        maxZoom: 19,
+        attribution: "© OpenStreetMap contributors",
+      }).addTo(mapRef.current);
+      markerRef.current = L.marker([lat, lng]).addTo(mapRef.current);
+      circleRef.current = L.circle([lat, lng], { radius, color: "#4C8C5B", fillColor: "#4C8C5B", fillOpacity: 0.15 }).addTo(mapRef.current);
+    } else {
+      mapRef.current.setView([lat, lng], mapRef.current.getZoom());
+      markerRef.current.setLatLng([lat, lng]);
+      circleRef.current.setLatLng([lat, lng]);
+      circleRef.current.setRadius(radius);
+    }
+    setTimeout(() => mapRef.current && mapRef.current.invalidateSize(), 100);
+    return () => {
+      if (mapRef.current) {
+        mapRef.current.remove();
+        mapRef.current = null;
+      }
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [lat, lng, radius]);
+
+  return <div ref={containerRef} style={{ width: "100%", height: 220, borderRadius: 10, overflow: "hidden", border: "1px solid #d8cfa8", marginTop: 6 }} />;
 }
 
 /* ---------------- simple camera selfie capture (proof photo, no liveness claim) ---------------- */
@@ -400,7 +428,7 @@ function SelfieCaptureModal({ studentName, onCapture, onCancel }) {
       .catch((err) => {
         if (cancelled) return;
         setStatus("error");
-        setErrMsg(err && err.message ? err.message : "Camera access nahi mil paaya.");
+        setErrMsg(err && err.message ? err.message : "Could not get camera access.");
       });
     return () => {
       cancelled = true;
@@ -440,23 +468,23 @@ function SelfieCaptureModal({ studentName, onCapture, onCancel }) {
   return (
     <div style={styles.modalOverlay} className="no-print">
       <div style={styles.selfieCard}>
-        <div style={styles.selfieTitle}>📸 {studentName} ki selfie proof</div>
-        <div style={styles.selfieSub}>Present dabate hi ek photo save hogi (proof ke liye — ye liveness-verified nahi hai).</div>
+        <div style={styles.selfieTitle}>📸 Selfie proof for {studentName}</div>
+        <div style={styles.selfieSub}>A photo will be saved as soon as you tap Present (for proof only — this is not liveness-verified).</div>
         <div style={styles.selfieFrame}>
           {status === "error" ? (
             <div style={styles.selfieErrorBox}>
-              Camera nahi khul paaya.<br />
+              Camera could not open.<br />
               <span style={{ fontSize: 10.5, opacity: 0.8 }}>{errMsg}</span>
             </div>
           ) : (
             <video ref={videoRef} playsInline muted style={{ ...styles.selfieVideo, transform: "scaleX(-1)" }} />
           )}
-          {status === "starting" && <div style={styles.selfieLoadingTag}>Camera khul raha hai…</div>}
+          {status === "starting" && <div style={styles.selfieLoadingTag}>Opening camera…</div>}
         </div>
         <div style={styles.selfieBtnRow}>
           <button style={styles.selfieCancelBtn} onClick={cancel}>Cancel</button>
           <button style={styles.selfieCaptureBtn} onClick={capture} disabled={status !== "ready"}>
-            <Camera size={15} style={{ marginRight: 6, verticalAlign: -3 }} />Capture &amp; Present maaro
+            <Camera size={15} style={{ marginRight: 6, verticalAlign: -3 }} />Capture &amp; Mark Present
           </button>
         </div>
       </div>
@@ -487,9 +515,9 @@ function PinPromptModal({ studentName, expectedPin, mode, isAdminPin, onSuccess,
   return (
     <div style={styles.modalOverlay} className="no-print">
       <div style={styles.pinCard}>
-        <div style={styles.selfieTitle}>🔒 {isAdminPin ? "Admin PIN daalo" : `${studentName} ka PIN daalo`}</div>
+        <div style={styles.selfieTitle}>🔒 {isAdminPin ? "Enter Admin PIN" : `Enter ${studentName}'s PIN`}</div>
         <div style={styles.selfieSub}>
-          {mode === "remove" ? "Present hataane" : "Present lagane"} ke liye {isAdminPin ? "Admin ka" : "apna"} {maxLen}-digit PIN daalo.
+          Enter {isAdminPin ? "the Admin" : "your"} {maxLen}-digit PIN to {mode === "remove" ? "remove" : "mark"} Present.
         </div>
         <input
           ref={inputRef}
@@ -502,7 +530,7 @@ function PinPromptModal({ studentName, expectedPin, mode, isAdminPin, onSuccess,
           style={styles.pinInput}
           placeholder="••••"
         />
-        {wrong && <div style={styles.pinWrongMsg}>Galat PIN, dobara koshish karo.</div>}
+        {wrong && <div style={styles.pinWrongMsg}>Wrong PIN, try again.</div>}
         <div style={styles.selfieBtnRow}>
           <button style={styles.selfieCancelBtn} onClick={onCancel}>Cancel</button>
           <button style={styles.selfieCaptureBtn} onClick={submit} disabled={pin.length < 4}>Confirm</button>
@@ -548,9 +576,9 @@ function AttendanceApp({ userEmail, onLogout, isGuest, isAdmin, client, signupCl
   const [geoRadiusDraft, setGeoRadiusDraft] = useState(150);
   const [geoSaving, setGeoSaving] = useState(false);
   const [geoSetupError, setGeoSetupError] = useState("");
+  const [showGeoMap, setShowGeoMap] = useState(false);
   const [geoCheckingId, setGeoCheckingId] = useState(null);
   const [geoBlockedFor, setGeoBlockedFor] = useState(null);
-  const [linkCopied, setLinkCopied] = useState(false);
 
   const [newRoll, setNewRoll] = useState("");
   const [newName, setNewName] = useState("");
@@ -629,7 +657,8 @@ function AttendanceApp({ userEmail, onLogout, isGuest, isAdmin, client, signupCl
   const lateTime = activeClass ? (activeClass.lateTime || "") : "";
   const geoCenter = activeClass ? (activeClass.geoCenter || null) : null;
   const geoRadius = activeClass ? (activeClass.geoRadius || 150) : 150;
-  const checkinCode = activeClass ? (activeClass.checkinCode || "") : "";
+  const selfieOn = activeClass ? (activeClass.selfieOn !== false) : true;
+  const locationOn = activeClass ? (activeClass.locationOn !== false) : true;
   const classInfo = { className: activeClass ? activeClass.className : "", teacher: activeClass ? activeClass.teacher : "" };
 
   const matchesSearch = (s, q) => !q.trim() || s.name.toLowerCase().includes(q.trim().toLowerCase()) || String(s.roll).toLowerCase().includes(q.trim().toLowerCase());
@@ -652,7 +681,8 @@ function AttendanceApp({ userEmail, onLogout, isGuest, isAdmin, client, signupCl
   const setLateTime = (val) => updateActive(() => ({ lateTime: val }));
   const setGeoCenter = (val) => updateActive(() => ({ geoCenter: val }));
   const setGeoRadius = (val) => updateActive(() => ({ geoRadius: val }));
-  const setCheckinCode = (val) => updateActive(() => ({ checkinCode: val }));
+  const setSelfieOn = (val) => updateActive(() => ({ selfieOn: val }));
+  const setLocationOn = (val) => updateActive(() => ({ locationOn: val }));
   const toggleHoliday = (dateStr, label) => {
     setHolidays((prev) => {
       const next = { ...prev };
@@ -723,13 +753,13 @@ function AttendanceApp({ userEmail, onLogout, isGuest, isAdmin, client, signupCl
   const deleteClass = () => {
     if (!activeClass || !isAdmin) return;
     const storedPin = localStorage.getItem(DELETE_PIN_KEY) || DEFAULT_DELETE_PIN;
-    const entered = window.prompt("Entities delete karne ke liye Admin PIN daalo:");
+    const entered = window.prompt("Enter Admin PIN to delete this entity:");
     if (entered === null) return; // cancelled
     if (entered.trim() !== storedPin) {
-      window.alert("Galat PIN. Entities delete nahi hui.");
+      window.alert("Wrong PIN. Entity was not deleted.");
       return;
     }
-    const ok = window.confirm(`"${activeClass.className || "Untitled Entities"}" delete karein? Iska poora data (candidates + attendance) mit jaayega.`);
+    const ok = window.confirm(`Delete "${activeClass.className || "Untitled Entities"}"? All its data (candidates + attendance) will be permanently erased.`);
     if (!ok) return;
     setClasses((prev) => {
       const remaining = prev.filter((c) => c.id !== activeClassId);
@@ -741,21 +771,21 @@ function AttendanceApp({ userEmail, onLogout, isGuest, isAdmin, client, signupCl
 
   const changeDeletePin = () => {
     const storedPin = localStorage.getItem(DELETE_PIN_KEY) || DEFAULT_DELETE_PIN;
-    const current = window.prompt("Abhi ka Admin PIN daalo (default: " + DEFAULT_DELETE_PIN + "):");
+    const current = window.prompt("Enter current Admin PIN (default: " + DEFAULT_DELETE_PIN + "):");
     if (current === null) return;
     if (current.trim() !== storedPin) {
-      window.alert("Galat PIN.");
+      window.alert("Wrong PIN.");
       return;
     }
-    const next = window.prompt("Naya PIN daalo (4-6 digit):");
+    const next = window.prompt("Enter new PIN (4-6 digits):");
     if (!next || !next.trim()) return;
-    const confirmNext = window.prompt("Naya PIN dobara daalo (confirm):");
+    const confirmNext = window.prompt("Enter new PIN again (confirm):");
     if (next.trim() !== (confirmNext || "").trim()) {
-      window.alert("Dono PIN match nahi hue. Kuch nahi badla.");
+      window.alert("The two PINs did not match. Nothing was changed.");
       return;
     }
     localStorage.setItem(DELETE_PIN_KEY, next.trim());
-    window.alert("PIN update ho gaya.");
+    window.alert("PIN updated.");
   };
 
   /* ---------- Class Teacher logins (admin-only) ----------
@@ -777,17 +807,17 @@ function AttendanceApp({ userEmail, onLogout, isGuest, isAdmin, client, signupCl
     const pwd = teacherForm.password.trim();
     setTeacherPanelError("");
     if (!email || !pwd) {
-      setTeacherPanelError("Email aur password dono bharo.");
+      setTeacherPanelError("Enter both email and password.");
       return;
     }
     if (pwd.length < 6) {
-      setTeacherPanelError("Password kam se kam 6 characters ka rakhein.");
+      setTeacherPanelError("Password should be at least 6 characters.");
       return;
     }
     setTeacherSaving(true);
     const { data: signUpData, error: signUpError } = await signupClient.auth.signUp({ email, password: pwd });
     if (signUpError || !signUpData.user) {
-      setTeacherPanelError(signUpError ? signUpError.message : "Account nahi ban paaya.");
+      setTeacherPanelError(signUpError ? signUpError.message : "Account could not be created.");
       setTeacherSaving(false);
       return;
     }
@@ -795,7 +825,7 @@ function AttendanceApp({ userEmail, onLogout, isGuest, isAdmin, client, signupCl
       id: signUpData.user.id, email, role: "teacher", time_mode: teacherForm.timeMode,
     });
     if (profileError) {
-      setTeacherPanelError("Account ban gaya lekin profile save nahi hui — Supabase me 'profiles' table check karein.");
+      setTeacherPanelError("Account was created but the profile could not be saved — check the 'profiles' table in Supabase.");
     } else {
       setTeacherLastCreated({ email, password: pwd });
       setTeacherForm({ email: "", password: "", timeMode: false });
@@ -812,7 +842,7 @@ function AttendanceApp({ userEmail, onLogout, isGuest, isAdmin, client, signupCl
   };
 
   const deleteTeacherAccount = async (id) => {
-    const ok = window.confirm("Is entities custodian ka access hataayein? (Login abhi bhi Supabase me rahega, lekin ab kuch access nahi milega.)");
+    const ok = window.confirm("Remove this entity custodian's access? (The login will still exist in Supabase, but will no longer have any access.)");
     if (!ok) return;
     setTeacherSaving(true);
     const { error } = await client.from("profiles").delete().eq("id", id);
@@ -873,7 +903,7 @@ function AttendanceApp({ userEmail, onLogout, isGuest, isAdmin, client, signupCl
     const entered = window.prompt(`"${name || "Candidate"}" ko delete karne ke liye Admin PIN daalo:`);
     if (entered === null) return; // cancelled
     if (entered.trim() !== storedPin) {
-      window.alert("Galat PIN. Candidate delete nahi hua.");
+      window.alert("Wrong PIN. Candidate was not deleted.");
       return;
     }
     setStudents((prev) => prev.filter((s) => s.id !== id));
@@ -916,17 +946,6 @@ function AttendanceApp({ userEmail, onLogout, isGuest, isAdmin, client, signupCl
     setEditingId(null);
   };
 
-  const copyCheckinLink = async () => {
-    const url = `${window.location.origin}${window.location.pathname}?checkin=${checkinCode}`;
-    try {
-      await navigator.clipboard.writeText(url);
-      setLinkCopied(true);
-      setTimeout(() => setLinkCopied(false), 2000);
-    } catch (e) {
-      window.prompt("Link copy karo:", url);
-    }
-  };
-
   const captureGeoCenter = async () => {
     setGeoSaving(true);
     setGeoSetupError("");
@@ -935,7 +954,7 @@ function AttendanceApp({ userEmail, onLogout, isGuest, isAdmin, client, signupCl
       setGeoCenter({ lat: pos.coords.latitude, lng: pos.coords.longitude });
       setGeoRadius(Number(geoRadiusDraft) || 150);
     } catch (err) {
-      setGeoSetupError("Location nahi mil paayi — GPS/location permission on karke phir try karo.");
+      setGeoSetupError("Could not get location — turn on GPS/location permission and try again.");
     }
     setGeoSaving(false);
   };
@@ -1220,33 +1239,30 @@ function AttendanceApp({ userEmail, onLogout, isGuest, isAdmin, client, signupCl
 
       {isAdmin && (
         <div style={styles.viewAsRow} className="no-print">
-          <span style={styles.viewAsLabel}>Data dekh/edit karein:</span>
+          <span style={styles.viewAsLabel}>View/edit data:</span>
           <select
             style={styles.viewAsSelect}
             value={viewAsUserId || ""}
             onChange={(e) => onChangeViewAs(e.target.value)}
           >
-            <option value="">Apna data (Admin)</option>
+            <option value="">My data (Admin)</option>
             {teacherOptions.map((t) => (
               <option key={t.id} value={t.id}>{t.email}</option>
             ))}
           </select>
-          <button style={styles.linkBtnDark} onClick={changeDeletePin}>Delete PIN badlein</button>
+          <button style={styles.linkBtnDark} onClick={changeDeletePin}>Change Delete PIN</button>
         </div>
       )}
 
       {isAdmin && viewingTeacherEmail && (
         <div style={styles.viewingBanner} className="no-print">
-          Admin Mode — <b>{viewingTeacherEmail}</b> ki entities dekh/edit kar rahe ho.
+          Admin Mode — viewing <b>{viewingTeacherEmail}</b> 's entities.
         </div>
       )}
 
       {isAdmin && showTeacherPanel && (
         <div style={styles.teacherPanelWrap} className="no-print">
           <div style={styles.teacherPanelTitle}>Entities Custodian Logins</div>
-          <div style={authStyles.stepText}>
-            Yahan se har entities custodian ke liye ek login (email + password) banao. Wo isi se login karke apni khud ki entities/sections bana sakta hai, aur sirf apni banayi entities ka hi data dekh/edit kar sakta hai.
-          </div>
 
           {teacherLastCreated && (
             <div style={styles.teacherCreatedBox}>
@@ -1264,7 +1280,7 @@ function AttendanceApp({ userEmail, onLogout, isGuest, isAdmin, client, signupCl
           </div>
           <label style={styles.timeModeCheckboxRow}>
             <input type="checkbox" checked={teacherForm.timeMode} onChange={(e) => setTeacherForm((p) => ({ ...p, timeMode: e.target.checked }))} />
-            Ye login <b>Time Mode</b> register use karega (OFF = Normal register)
+            This login will use the <b>Time Mode</b> register (OFF = Normal register)
           </label>
           {teacherPanelError && <div style={authStyles.error}>{teacherPanelError}</div>}
           <button style={styles.teacherPanelBtn} onClick={createTeacherAccount} disabled={teacherSaving}>
@@ -1273,7 +1289,7 @@ function AttendanceApp({ userEmail, onLogout, isGuest, isAdmin, client, signupCl
 
           <div style={{ marginTop: 12 }}>
             {teacherAccounts.length === 0 ? (
-              <div style={authStyles.stepText}>Abhi tak koi entities custodian login nahi bana.</div>
+              <div style={authStyles.stepText}>No entity custodian logins created yet.</div>
             ) : (
               teacherAccounts.map((t) => (
                 <div key={t.id} style={styles.teacherRow}>
@@ -1303,7 +1319,7 @@ function AttendanceApp({ userEmail, onLogout, isGuest, isAdmin, client, signupCl
         <div style={styles.board} className="no-print">
           <div style={styles.boardTexture} />
           <div style={{ position: "relative", zIndex: 1 }}>
-            <div style={styles.chalkTitle}>उपस्थिति रजिस्टर</div>
+            <div style={styles.chalkTitle}>ATTENDANCE REGISTER</div>
             <div style={styles.chalkSub}>Candidate Attendance Register</div>
 
             <div style={styles.classSwitchRow}>
@@ -1333,7 +1349,7 @@ function AttendanceApp({ userEmail, onLogout, isGuest, isAdmin, client, signupCl
               <div style={styles.newClassRow}>
                 <input
                   style={styles.chalkInput}
-                  placeholder="Nayi entities ka naam (e.g. Entities 6-A)"
+                  placeholder="New entity name (e.g. Entity 6-A)"
                   value={newClassName}
                   onChange={(e) => setNewClassName(e.target.value)}
                   onKeyDown={(e) => e.key === "Enter" && addClass()}
@@ -1362,7 +1378,7 @@ function AttendanceApp({ userEmail, onLogout, isGuest, isAdmin, client, signupCl
                   </div>
                 ) : (
                   <div style={styles.classFieldViewRow}>
-                    <div style={styles.classFieldValue}>{classInfo.className || "Set nahi hai"}</div>
+                    <div style={styles.classFieldValue}>{classInfo.className || "Not set"}</div>
                     <button style={styles.classFieldEditBtn} onClick={() => startEditClassField("className")} aria-label="Edit entities / section"><Pencil size={13} /></button>
                   </div>
                 )}
@@ -1385,7 +1401,7 @@ function AttendanceApp({ userEmail, onLogout, isGuest, isAdmin, client, signupCl
                   </div>
                 ) : (
                   <div style={styles.classFieldViewRow}>
-                    <div style={styles.classFieldValue}>{classInfo.teacher || "Set nahi hai"}</div>
+                    <div style={styles.classFieldValue}>{classInfo.teacher || "Not set"}</div>
                     <button style={styles.classFieldEditBtn} onClick={() => startEditClassField("teacher")} aria-label="Edit custodian name"><Pencil size={13} /></button>
                   </div>
                 )}
@@ -1409,7 +1425,7 @@ function AttendanceApp({ userEmail, onLogout, isGuest, isAdmin, client, signupCl
         <div style={styles.paper} className={(view === "reports" || view === "register") ? "print-paper" : ""}>
           {view === "enrollment" && (
             <>
-              <div style={styles.sectionLabel}>Ek candidate add karo</div>
+              <div style={styles.sectionLabel}>Add a candidate</div>
               <div style={styles.addRow}>
                 <input style={{ ...styles.textInput, width: 64, flexShrink: 0 }} placeholder="Roll" value={newRoll} onChange={(e) => setNewRoll(e.target.value)} />
                 <input ref={nameInputRef} style={{ ...styles.textInput, flex: 1 }} placeholder="Candidate name" value={newName}
@@ -1417,13 +1433,13 @@ function AttendanceApp({ userEmail, onLogout, isGuest, isAdmin, client, signupCl
                 <button style={styles.addBtn} onClick={addStudent} aria-label="Add candidate"><Plus size={18} /></button>
               </div>
 
-              <div style={styles.sectionLabel}>Ya ek saath poori list paste karo (ek line me ek naam)</div>
+              <div style={styles.sectionLabel}>Or paste the whole list at once (one name per line)</div>
               <textarea style={styles.bulkArea} placeholder={"Rohit Sharma\nPriya Verma\n03. Aman Khan"} value={bulkText}
                 onChange={(e) => setBulkText(e.target.value)} rows={4} />
-              <button style={styles.bulkBtn} onClick={addBulk} disabled={!bulkText.trim()}>Sabko enroll karo</button>
+              <button style={styles.bulkBtn} onClick={addBulk} disabled={!bulkText.trim()}>Enroll all</button>
 
               <div style={{ ...styles.sectionLabel, marginTop: 18 }}>
-                {classInfo.className || "Is entities"} me enrolled candidates ({students.filter((s) => s.active !== false).length} active / {students.length} total)
+                Candidates enrolled in {classInfo.className || "this entity"} ({students.filter((s) => s.active !== false).length} active / {students.length} total)
               </div>
 
               {students.length > 5 && (
@@ -1431,7 +1447,7 @@ function AttendanceApp({ userEmail, onLogout, isGuest, isAdmin, client, signupCl
                   <SearchIcon size={15} color="#b3a889" style={{ flexShrink: 0 }} />
                   <input
                     style={styles.searchInput}
-                    placeholder="Naam ya roll se search karo…"
+                    placeholder="Search by name or roll…"
                     value={enrollSearch}
                     onChange={(e) => setEnrollSearch(e.target.value)}
                   />
@@ -1442,9 +1458,9 @@ function AttendanceApp({ userEmail, onLogout, isGuest, isAdmin, client, signupCl
               )}
 
               {students.length === 0 ? (
-                <div style={styles.empty}>Abhi koi candidate enroll nahi hua.</div>
+                <div style={styles.empty}>No candidates enrolled yet.</div>
               ) : enrollListShown.length === 0 ? (
-                <div style={styles.empty}>"{enrollSearch}" se koi candidate nahi mila.</div>
+                <div style={styles.empty}>"{enrollSearch}" matched no candidates.</div>
               ) : (
                 <div style={styles.ledger}>
                   {enrollListShown.map((s, idx) => {
@@ -1483,7 +1499,7 @@ function AttendanceApp({ userEmail, onLogout, isGuest, isAdmin, client, signupCl
                               </div>
                             )}
                             {isAdmin && teacherMode && (
-                              <div style={styles.pinStatusTag}>{s.pin ? "🔒 PIN set" : "🔓 PIN nahi set hai"}</div>
+                              <div style={styles.pinStatusTag}>{s.pin ? "🔒 PIN set" : "🔓 PIN not set"}</div>
                             )}
                           </div>
                           {isAdmin ? (
@@ -1491,13 +1507,13 @@ function AttendanceApp({ userEmail, onLogout, isGuest, isAdmin, client, signupCl
                               style={{ ...styles.deleteBtn, color: s.starred ? "#D14343" : "#c9bd98" }}
                               onClick={() => toggleStar(s.id)}
                               aria-label={s.starred ? `Remove star from ${s.name}` : `Star mark ${s.name}`}
-                              title={s.starred ? "Star hataane ke liye tap karo" : "Star mark karne ke liye tap karo"}
+                              title={s.starred ? "Tap to remove star" : "Tap to star mark"}
                             >
                               <Star size={14} fill={s.starred ? "#D14343" : "none"} />
                             </button>
                           ) : (
                             s.starred && (
-                              <span title="Admin dwara star mark" style={{ display: "inline-flex", color: "#D14343", flexShrink: 0 }}>
+                              <span title="Star marked by Admin" style={{ display: "inline-flex", color: "#D14343", flexShrink: 0 }}>
                                 <Star size={14} fill="#D14343" />
                               </span>
                             )
@@ -1538,7 +1554,7 @@ function AttendanceApp({ userEmail, onLogout, isGuest, isAdmin, client, signupCl
               <div style={{ marginBottom: 10 }} className="no-print">
                 {(isGuest || viewingTeacherEmail) ? (
                   <div style={{ ...styles.teacherModeBtn, ...(teacherMode ? styles.teacherModeBtnActive : {}), cursor: "default", textAlign: "center" }}>
-                    ⏱️ Time Mode {teacherMode ? "ON" : "OFF"} <span style={{ fontWeight: 400, opacity: 0.85 }}>{isGuest ? "(Admin ne set kiya hai)" : "(Is custodian ke login se set hai)"}</span>
+                    ⏱️ Time Mode {teacherMode ? "ON" : "OFF"} <span style={{ fontWeight: 400, opacity: 0.85 }}>{isGuest ? "(Set by Admin)" : "(Set from this custodian's login)"}</span>
                   </div>
                 ) : (
                   <button
@@ -1550,16 +1566,26 @@ function AttendanceApp({ userEmail, onLogout, isGuest, isAdmin, client, signupCl
                 )}
                 {teacherMode && (
                   <>
-                    <div style={styles.teacherModeHint}>Present dabate hi naam ke niche time print hoga, aur ek selfie proof photo li jaayegi.</div>
-                    <div style={{ ...styles.teacherModeHint, marginTop: 2, fontSize: 10 }}>(Selfie sirf proof ke liye hai — ye liveness-verified nahi hai. 45 din baad selfies khud-ba-khud delete ho jaati hain.)</div>
+                    {isAdmin && (
+                      <div style={styles.lateTimeRow}>
+                        <span style={styles.lateTimeLabel}>📸 Selfie required when marking Present</span>
+                        <input type="checkbox" checked={selfieOn} onChange={(e) => setSelfieOn(e.target.checked)} />
+                      </div>
+                    )}
+                    {isAdmin && (
+                      <div style={styles.lateTimeRow}>
+                        <span style={styles.lateTimeLabel}>📍 Location check required when marking Present</span>
+                        <input type="checkbox" checked={locationOn} onChange={(e) => setLocationOn(e.target.checked)} />
+                      </div>
+                    )}
                     {lateTime && !lateTimeEditing ? (
                       <div style={styles.lateTimeSavedRow}>
-                        <span style={styles.lateTimeLabel}>⏰ {lateTime} ke baad Late maana jayega</span>
-                        <button style={styles.lateTimeEditLink} onClick={() => setLateTimeEditing(true)}>Badlo</button>
+                        <span style={styles.lateTimeLabel}>⏰ {lateTime} onward is marked Late</span>
+                        <button style={styles.lateTimeEditLink} onClick={() => setLateTimeEditing(true)}>Change</button>
                       </div>
                     ) : (
                       <div style={styles.lateTimeRow}>
-                        <span style={styles.lateTimeLabel}>⏰ Is time ke baad Late maana jaye:</span>
+                        <span style={styles.lateTimeLabel}>⏰ Mark Late after this time:</span>
                         <input
                           type="time"
                           style={styles.lateTimeInput}
@@ -1571,12 +1597,12 @@ function AttendanceApp({ userEmail, onLogout, isGuest, isAdmin, client, signupCl
                           style={styles.lateTimeSaveBtn}
                           onClick={() => setLateTimeEditing(false)}
                           disabled={!lateTime}
-                          aria-label="Late time save karo"
+                          aria-label="Save late time"
                         >
                           <Check size={13} />
                         </button>
                         {lateTime && (
-                          <button style={styles.lateTimeClearBtn} onClick={() => { setLateTime(""); setLateTimeEditing(false); }} aria-label="Late time hatao">
+                          <button style={styles.lateTimeClearBtn} onClick={() => { setLateTime(""); setLateTimeEditing(false); }} aria-label="Clear late time">
                             <X size={12} />
                           </button>
                         )}
@@ -1585,13 +1611,17 @@ function AttendanceApp({ userEmail, onLogout, isGuest, isAdmin, client, signupCl
 
                     {isAdmin && (
                       geoCenter ? (
-                        <div style={styles.lateTimeSavedRow}>
-                          <span style={styles.lateTimeLabel}>📍 Geo-circle set hai (radius {geoRadius}m)</span>
-                          <button style={styles.lateTimeEditLink} onClick={() => { setGeoRadiusDraft(geoRadius); setGeoCenter(null); }}>Badlo</button>
-                        </div>
+                        <>
+                          <div style={styles.lateTimeSavedRow}>
+                            <span style={styles.lateTimeLabel}>📍 Geo-circle is set (radius {geoRadius}m)</span>
+                            <button style={styles.lateTimeEditLink} onClick={() => setShowGeoMap((v) => !v)}>{showGeoMap ? "Hide map" : "View map"}</button>
+                            <button style={styles.lateTimeEditLink} onClick={() => { setGeoRadiusDraft(geoRadius); setGeoCenter(null); setShowGeoMap(false); }}>Change</button>
+                          </div>
+                          {showGeoMap && <GeoFenceMap lat={geoCenter.lat} lng={geoCenter.lng} radius={geoRadius} />}
+                        </>
                       ) : (
                         <div style={styles.lateTimeRow}>
-                          <span style={styles.lateTimeLabel}>📍 Yahan ko present-marking area banao:</span>
+                          <span style={styles.lateTimeLabel}>📍 Set this as the present-marking area:</span>
                           <input
                             type="number"
                             min="20"
@@ -1600,33 +1630,13 @@ function AttendanceApp({ userEmail, onLogout, isGuest, isAdmin, client, signupCl
                             onChange={(e) => setGeoRadiusDraft(e.target.value)}
                           />
                           <span style={{ ...styles.lateTimeLabel, fontWeight: 400 }}>m radius</span>
-                          <button style={styles.lateTimeSaveBtn} onClick={captureGeoCenter} disabled={geoSaving} aria-label="Yahan ko center set karo">
+                          <button style={styles.lateTimeSaveBtn} onClick={captureGeoCenter} disabled={geoSaving} aria-label="Set this as center">
                             {geoSaving ? "…" : <MapPin size={13} />}
                           </button>
                         </div>
                       )
                     )}
                     {isAdmin && geoSetupError && <div style={styles.pinWrongMsg}>{geoSetupError}</div>}
-                    {isAdmin && geoCenter && (
-                      <div style={{ ...styles.teacherModeHint, marginTop: 2, fontSize: 10 }}>(Custodian ko sirf is area ke andar hi Present dabane diya jaayega — usko center/radius nahi dikhega.)</div>
-                    )}
-
-                    {isAdmin && (
-                      checkinCode ? (
-                        <div style={styles.lateTimeSavedRow}>
-                          <span style={styles.lateTimeLabel}>🔗 Self-attendance link ON (code: {checkinCode})</span>
-                          <button style={styles.lateTimeEditLink} onClick={copyCheckinLink}>{linkCopied ? "Copied!" : "Copy link"}</button>
-                          <button style={styles.lateTimeClearBtn} onClick={() => setCheckinCode("")} aria-label="Link band karo"><X size={12} /></button>
-                        </div>
-                      ) : (
-                        <div style={styles.lateTimeRow}>
-                          <span style={styles.lateTimeLabel}>🔗 Candidates khud apni attendance laga sakein:</span>
-                          <button style={styles.lateTimeSaveBtn} onClick={() => setCheckinCode(randomCheckinCode())} aria-label="Link banao">
-                            <Link2 size={13} style={{ marginRight: 4, verticalAlign: -2 }} />Link banao
-                          </button>
-                        </div>
-                      )
-                    )}
                   </>
                 )}
               </div>
@@ -1634,13 +1644,13 @@ function AttendanceApp({ userEmail, onLogout, isGuest, isAdmin, client, signupCl
               {holidays[selectedDate] ? (
                 <div style={styles.holidayActiveRow} className="no-print">
                   <span style={styles.holidayBadge}>🎌 {holidays[selectedDate]}</span>
-                  <button style={styles.linkBtnDark} onClick={() => toggleHoliday(selectedDate)}>Holiday hataao</button>
+                  <button style={styles.linkBtnDark} onClick={() => toggleHoliday(selectedDate)}>Remove holiday</button>
                 </div>
               ) : showHolidayForm ? (
                 <div style={styles.classFieldEditRow} className="no-print">
                   <input
                     style={styles.textInput}
-                    placeholder="Holiday ka naam (e.g. Sunday / Gandhi Jayanti)"
+                    placeholder="Holiday name (e.g. Sunday / Gandhi Jayanti)"
                     value={holidayDraft}
                     onChange={(e) => setHolidayDraft(e.target.value)}
                     onKeyDown={(e) => e.key === "Enter" && (toggleHoliday(selectedDate, holidayDraft), setShowHolidayForm(false))}
@@ -1651,7 +1661,7 @@ function AttendanceApp({ userEmail, onLogout, isGuest, isAdmin, client, signupCl
                 </div>
               ) : (
                 <div style={{ marginBottom: 10 }} className="no-print">
-                  <button style={styles.holidayMarkBtn} onClick={() => setShowHolidayForm(true)}>🎌 Is din ko holiday/chutti mark karo</button>
+                  <button style={styles.holidayMarkBtn} onClick={() => setShowHolidayForm(true)}>🎌 Mark this day as a holiday</button>
                 </div>
               )}
 
@@ -1666,9 +1676,9 @@ function AttendanceApp({ userEmail, onLogout, isGuest, isAdmin, client, signupCl
                         onClick={toggleAllPresent}
                       >
                         {allPresent ? (
-                          <><X size={13} style={{ marginRight: 4, verticalAlign: -2 }} />Sabko clear karo</>
+                          <><X size={13} style={{ marginRight: 4, verticalAlign: -2 }} />Clear all</>
                         ) : (
-                          <><Check size={13} style={{ marginRight: 4, verticalAlign: -2 }} />Sabko Present karo</>
+                          <><Check size={13} style={{ marginRight: 4, verticalAlign: -2 }} />Mark all Present</>
                         )}
                       </button>
                     );
@@ -1681,7 +1691,7 @@ function AttendanceApp({ userEmail, onLogout, isGuest, isAdmin, client, signupCl
                   <SearchIcon size={15} color="#b3a889" style={{ flexShrink: 0 }} />
                   <input
                     style={styles.searchInput}
-                    placeholder="Naam ya roll se search karo…"
+                    placeholder="Search by name or roll…"
                     value={registerSearch}
                     onChange={(e) => setRegisterSearch(e.target.value)}
                   />
@@ -1692,11 +1702,11 @@ function AttendanceApp({ userEmail, onLogout, isGuest, isAdmin, client, signupCl
               )}
 
               {holidays[selectedDate] ? (
-                <div style={styles.empty}>Aaj "{holidays[selectedDate]}" ke karan chhutti hai — attendance mark nahi hogi. Report me is din ki jagah poori column me line bhar jaayegi.</div>
+                <div style={styles.empty}>Today is a holiday due to "{holidays[selectedDate]}" — attendance will not be marked. In reports, this day's column will be shown as a full line instead.</div>
               ) : activeStudents.length === 0 ? (
-                <div style={styles.empty}>{students.length ? "Sabhi candidates inactive hain. Enrollment tab me unhe active karo." : "Pehle Enrollment tab se candidates add karo."}</div>
+                <div style={styles.empty}>{students.length ? "All candidates are inactive. Activate them from the Enrollment tab." : "First add candidates from the Enrollment tab."}</div>
               ) : registerListShown.length === 0 ? (
-                <div style={styles.empty}>"{registerSearch}" se koi candidate nahi mila.</div>
+                <div style={styles.empty}>"{registerSearch}" matched no candidates.</div>
               ) : (
                 <div style={styles.ledger}>
                   {registerListShown.map((s, idx) => {
@@ -1723,13 +1733,13 @@ function AttendanceApp({ userEmail, onLogout, isGuest, isAdmin, client, signupCl
                               type="button"
                               onClick={() => setViewingSelfie({ url: attendanceSelfies[selectedDate][s.id], name: s.name, date: selectedDate, time: (attendanceTimes[selectedDate] && attendanceTimes[selectedDate][s.id]) || null })}
                               style={styles.studentSelfieThumbBtn}
-                              aria-label={`${s.name} ki selfie dekho`}
+                              aria-label={`View ${s.name}'s selfie`}
                             >
                               <img src={attendanceSelfies[selectedDate][s.id]} alt="Selfie proof" style={styles.studentSelfieThumb} />
                             </button>
                           )}
                           {geoBlockedFor === s.id && (
-                            <div style={styles.studentTimeTagLate}>📍 School area ke bahar ho — Present nahi ho paaya</div>
+                            <div style={styles.studentTimeTagLate}>📍 Outside school area — could not mark Present</div>
                           )}
                         </div>
                         <div style={styles.statusGroup}>
@@ -1742,7 +1752,7 @@ function AttendanceApp({ userEmail, onLogout, isGuest, isAdmin, client, signupCl
                                 className={anim ? "stamp-pop chalk-btn" : "chalk-btn"}
                                 disabled={geoCheckingId === s.id}
                                 onClick={async () => {
-                                  if (code === "P" && teacherMode && isGuest && geoCenter && st !== "P") {
+                                  if (code === "P" && teacherMode && isGuest && locationOn && geoCenter && st !== "P") {
                                     setGeoCheckingId(s.id);
                                     try {
                                       const pos = await getCurrentPositionAsync();
@@ -1770,7 +1780,11 @@ function AttendanceApp({ userEmail, onLogout, isGuest, isAdmin, client, signupCl
                                     return;
                                   }
                                   if (code === "P" && teacherMode && st !== "P") {
-                                    setSelfieTarget(s);
+                                    if (selfieOn) {
+                                      setSelfieTarget(s);
+                                    } else {
+                                      markStatus(s.id, "P");
+                                    }
                                   } else {
                                     markStatus(s.id, code);
                                   }
@@ -1814,7 +1828,6 @@ function AttendanceApp({ userEmail, onLogout, isGuest, isAdmin, client, signupCl
                   >
                     <Printer size={14} style={{ marginRight: 6, verticalAlign: -2 }} />Print PDF
                   </button>
-                  <div className="no-print" style={styles.pdfHint}>Print dialog me "Save as PDF" choose karo.</div>
                 </>
               )}
             </>
@@ -1860,9 +1873,9 @@ function AttendanceApp({ userEmail, onLogout, isGuest, isAdmin, client, signupCl
                   </div>
 
                   {students.length === 0 ? (
-                    <div style={styles.empty}>Abhi koi candidate enroll nahi hai.</div>
+                    <div style={styles.empty}>No candidates enrolled yet.</div>
                   ) : monthDates.length === 0 ? (
-                    <div style={styles.empty}>Is mahine ke liye abhi koi attendance mark nahi hui.</div>
+                    <div style={styles.empty}>No attendance marked yet for this month.</div>
                   ) : (
                     <>
                       <div style={styles.reportTableWrap} className="print-table">
@@ -1890,11 +1903,10 @@ function AttendanceApp({ userEmail, onLogout, isGuest, isAdmin, client, signupCl
                           <div style={styles.summaryPct}>{monthClassAvg === null ? "—" : `${monthClassAvg}%`}</div>
                           <div style={styles.summaryPctLabel}>entities average</div>
                         </div>
-                        <div style={styles.summaryStats}><div style={styles.summaryStatLine2}>{monthDates.length} din mark hue is mahine</div></div>
+                        <div style={styles.summaryStats}><div style={styles.summaryStatLine2}>{monthDates.length} days marked this month</div></div>
                         <button style={styles.printBtn} className="no-print" onClick={printReport}><Printer size={14} style={{ marginRight: 5, verticalAlign: -2 }} />Download PDF</button>
                       </div>
-                      <div className="no-print" style={styles.pdfHint}>Print dialog me "Save as PDF" choose karo.</div>
-                    </>
+                        </>
                   )}
                 </>
               )}
@@ -1905,7 +1917,7 @@ function AttendanceApp({ userEmail, onLogout, isGuest, isAdmin, client, signupCl
                     <button style={styles.dateArrow} onClick={() => shiftYear(-1)} aria-label="Previous year"><ChevronLeft size={18} /></button>
                     <div style={styles.dateBlock}>
                       <input type="number" value={selectedYear} onChange={(e) => setSelectedYear(e.target.value)} style={{ ...styles.dateInput, width: 90, textAlign: "center" }} />
-                      <div style={styles.dateLabel}>Poora saal</div>
+                      <div style={styles.dateLabel}>Full year</div>
                     </div>
                     <button style={styles.dateArrow} onClick={() => shiftYear(1)} aria-label="Next year"><ChevronRight size={18} /></button>
                   </div>
@@ -1922,9 +1934,9 @@ function AttendanceApp({ userEmail, onLogout, isGuest, isAdmin, client, signupCl
                   </div>
 
                   {students.length === 0 ? (
-                    <div style={styles.empty}>Abhi koi candidate enroll nahi hai.</div>
+                    <div style={styles.empty}>No candidates enrolled yet.</div>
                   ) : yearDates.length === 0 ? (
-                    <div style={styles.empty}>{academicYearLabel(selectedYear)} me abhi koi attendance mark nahi hui.</div>
+                    <div style={styles.empty}>{academicYearLabel(selectedYear)} has no attendance marked yet.</div>
                   ) : (
                     <>
                       <div style={styles.reportTableWrap} className="print-table">
@@ -1954,11 +1966,10 @@ function AttendanceApp({ userEmail, onLogout, isGuest, isAdmin, client, signupCl
                           <div style={styles.summaryPct}>{yearClassAvg === null ? "—" : `${yearClassAvg}%`}</div>
                           <div style={styles.summaryPctLabel}>entities average</div>
                         </div>
-                        <div style={styles.summaryStats}><div style={styles.summaryStatLine2}>{yearDates.length} din mark hue {academicYearLabel(selectedYear)} me</div></div>
+                        <div style={styles.summaryStats}><div style={styles.summaryStatLine2}>{yearDates.length} days marked in {academicYearLabel(selectedYear)}</div></div>
                         <button style={styles.printBtn} className="no-print" onClick={printReport}><Printer size={14} style={{ marginRight: 5, verticalAlign: -2 }} />Download PDF</button>
                       </div>
-                      <div className="no-print" style={styles.pdfHint}>Print dialog me "Save as PDF" choose karo.</div>
-                    </>
+                        </>
                   )}
                 </>
               )}
@@ -1971,7 +1982,7 @@ function AttendanceApp({ userEmail, onLogout, isGuest, isAdmin, client, signupCl
                   </div>
 
                   {!selectedStudent ? (
-                    <div style={styles.empty}>Pehle Enrollment tab se candidates add karo.</div>
+                    <div style={styles.empty}>First add candidates from the Enrollment tab.</div>
                   ) : (
                     <>
                       <div style={styles.printTitle}>Candidate Attendance Report — {academicYearLabel(selectedYear)}</div>
@@ -2042,8 +2053,7 @@ function AttendanceApp({ userEmail, onLogout, isGuest, isAdmin, client, signupCl
                         <div style={{ flex: 1 }} />
                         <button style={styles.printBtn} className="no-print" onClick={printReport}><Printer size={14} style={{ marginRight: 5, verticalAlign: -2 }} />Download PDF</button>
                       </div>
-                      <div className="no-print" style={styles.pdfHint}>Print dialog me "Save as PDF" choose karo.</div>
-                    </>
+                        </>
                   )}
                 </>
               )}
@@ -2063,7 +2073,7 @@ function AttendanceApp({ userEmail, onLogout, isGuest, isAdmin, client, signupCl
                   </div>
 
                   {!selectedStudent ? (
-                    <div style={styles.empty}>Pehle Enrollment tab se candidates add karo.</div>
+                    <div style={styles.empty}>First add candidates from the Enrollment tab.</div>
                   ) : (
                     <>
                       <div style={styles.printTitle}>Date-wise Attendance — {selectedStudent.name} · {monthLabel}</div>
@@ -2137,8 +2147,7 @@ function AttendanceApp({ userEmail, onLogout, isGuest, isAdmin, client, signupCl
                         <div style={{ flex: 1 }} />
                         <button style={styles.printBtn} className="no-print" onClick={printReport}><Printer size={14} style={{ marginRight: 5, verticalAlign: -2 }} />Download PDF</button>
                       </div>
-                      <div className="no-print" style={styles.pdfHint}>Print dialog me "Save as PDF" choose karo.</div>
-                    </>
+                        </>
                   )}
                 </>
               )}
@@ -2166,7 +2175,7 @@ function AttendanceApp({ userEmail, onLogout, isGuest, isAdmin, client, signupCl
                   </div>
 
                   {students.length === 0 ? (
-                    <div style={styles.empty}>Abhi koi candidate enroll nahi hai.</div>
+                    <div style={styles.empty}>No candidates enrolled yet.</div>
                   ) : (
                     <>
                       {students.length > 5 && (
@@ -2174,7 +2183,7 @@ function AttendanceApp({ userEmail, onLogout, isGuest, isAdmin, client, signupCl
                           <SearchIcon size={15} color="#b3a889" style={{ flexShrink: 0 }} />
                           <input
                             style={styles.searchInput}
-                            placeholder="Naam ya roll se search karo…"
+                            placeholder="Search by name or roll…"
                             value={gridSearch}
                             onChange={(e) => setGridSearch(e.target.value)}
                           />
@@ -2183,7 +2192,6 @@ function AttendanceApp({ userEmail, onLogout, isGuest, isAdmin, client, signupCl
                           )}
                         </div>
                       )}
-                      <div className="no-print" style={styles.pdfHint}>{"\u2190"} Left-right scroll karo poori table dekhne ke liye</div>
                       <div style={styles.gridTableWrap} className="print-table">
                         <table style={{ ...styles.gridTable, "--daycols": daysInSelectedMonth }} className="grid-print-table">
                           <thead>
@@ -2249,20 +2257,9 @@ function AttendanceApp({ userEmail, onLogout, isGuest, isAdmin, client, signupCl
                           </tbody>
                         </table>
                       </div>
-                      <div className="no-print" style={{ ...styles.pdfHint, marginTop: 6 }}>
-                        Legend: <span style={{ color: STATUS.P.color, fontWeight: 700 }}>P</span> Present ·{" "}
-                        <span style={{ color: STATUS.A.color, fontWeight: 700 }}>A</span> Absent ·{" "}
-                        <span style={{ color: STATUS.L.color, fontWeight: 700 }}>L</span> Leave ·{" "}
-                        <span style={{ background: "#fdf3de", border: "1px solid #e8c468", padding: "0 5px", fontWeight: 700, color: "#8a5a1c" }}>▍</span> Holiday/Chutti (naam column me likha hoga)
-                        {" · "}Naam ke niche <span style={{ color: "#C1503D", fontWeight: 700 }}>L-x</span> (Late) aur <span style={{ color: "#B23A3A", fontWeight: 700 }}>A-x</span> (Absent) is mahine ka total hai.
-                      </div>
-
                       <div style={styles.summary}>
                         <div style={{ flex: 1 }} />
                         <button style={styles.printBtn} className="no-print" onClick={printReport}><Printer size={14} style={{ marginRight: 5, verticalAlign: -2 }} />Download PDF</button>
-                      </div>
-                      <div className="no-print" style={styles.landscapeWarn}>
-                        ⚠️ Poori table ek page me chahiye to Print dialog khulne par upar "Portrait" wale dropdown/Layout option par tap karke <b>Landscape</b> select karo, fir "Save as PDF" karo. (Android par ye setting app khud set nahi kar sakta, isliye manually badalni padti hai.)
                       </div>
                     </>
                   )}
@@ -2272,7 +2269,7 @@ function AttendanceApp({ userEmail, onLogout, isGuest, isAdmin, client, signupCl
           )}
         </div>
 
-        {saveError && <div style={styles.errorBanner} className="no-print">Save nahi ho paaya — data sirf is session ke liye hai.</div>}
+        {saveError && <div style={styles.errorBanner} className="no-print">Could not save — data exists only for this session.</div>}
       </div>
 
       {selfieTarget && (
@@ -2299,7 +2296,7 @@ function AttendanceApp({ userEmail, onLogout, isGuest, isAdmin, client, signupCl
               <div style={styles.selfieViewName}>{viewingSelfie.name}</div>
               <div style={styles.selfieViewSub}>{formatDateLabel(viewingSelfie.date)}{viewingSelfie.time ? ` · ${viewingSelfie.time}` : ""}</div>
             </div>
-            <button style={styles.selfieViewCloseBtn} onClick={() => setViewingSelfie(null)}>Band karo</button>
+            <button style={styles.selfieViewCloseBtn} onClick={() => setViewingSelfie(null)}>Close</button>
           </div>
         </div>
       )}
@@ -2314,7 +2311,11 @@ function AttendanceApp({ userEmail, onLogout, isGuest, isAdmin, client, signupCl
             const { student, turningOn, nextCode } = pinTarget;
             setPinTarget(null);
             if (turningOn) {
-              setSelfieTarget(student);
+              if (selfieOn) {
+                setSelfieTarget(student);
+              } else {
+                markStatus(student.id, "P");
+              }
             } else {
               markStatus(student.id, nextCode || "P");
             }
@@ -2430,7 +2431,6 @@ const styles = {
   pinWrongMsg: { color: "#C1503D", fontSize: 11.5, fontFamily: "'Inter', sans-serif", textAlign: "center", marginTop: 6, fontWeight: 600 },
   teacherModeBtn: { width: "100%", background: "#fdf3de", border: "1.5px dashed #8a5a1c", borderRadius: 8, padding: "9px 10px", fontFamily: "'Inter', sans-serif", fontWeight: 700, fontSize: 12.5, color: "#8a5a1c", cursor: "pointer" },
   teacherModeBtnActive: { background: "#4C8C5B", border: "1.5px solid #4C8C5B", color: "#fdfaf0" },
-  teacherModeHint: { fontSize: 11, color: "#8a8368", fontFamily: "'Inter', sans-serif", marginTop: 5, textAlign: "center" },
   lateTimeRow: { display: "flex", alignItems: "center", justifyContent: "center", gap: 6, marginTop: 8, background: "#fdf3de", border: "1px dashed #e8c468", borderRadius: 8, padding: "6px 10px" },
   lateTimeLabel: { fontSize: 11, color: "#8a5a1c", fontFamily: "'Inter', sans-serif", fontWeight: 600 },
   lateTimeInput: { border: "1px solid #d8cfae", borderRadius: 6, padding: "3px 6px", fontSize: 12, fontFamily: "'IBM Plex Mono', monospace", background: "#fff", color: "#2B2318", outline: "none" },
@@ -2453,8 +2453,6 @@ const styles = {
   printOnlyHeader: { marginBottom: 16, borderBottom: "2px solid #333", paddingBottom: 10 },
   printOnlyMainTitle: { fontFamily: "'Inter', sans-serif", fontSize: 20, fontWeight: 700, color: "#111", marginBottom: 6 },
   printOnlyMeta: { display: "flex", gap: 16, flexWrap: "wrap", fontSize: 12, color: "#333", fontFamily: "'Inter', sans-serif" },
-  pdfHint: { fontSize: 11, color: "#8a8368", textAlign: "center", marginTop: 8, fontFamily: "'Inter', sans-serif" },
-  landscapeWarn: { fontSize: 11.5, color: "#8a5a1c", textAlign: "center", marginTop: 8, fontFamily: "'Inter', sans-serif", background: "#fdf3de", border: "1px solid #e8c468", borderRadius: 8, padding: "8px 10px", lineHeight: 1.45 },
   reportTableWrap: { background: "#fffdf7", border: "1px solid #e3d9b8", borderRadius: 10, overflow: "auto" },
   gridTableWrap: { background: "#fffdf7", border: "1px solid #e3d9b8", borderRadius: 10, overflow: "auto", maxWidth: "100%" },
   gridTable: { borderCollapse: "collapse", fontFamily: "'Inter', sans-serif" },
@@ -2549,17 +2547,23 @@ function makeSupabaseStorage(client, userId) {
   };
 }
 
-function AuthScreen({ client, onAuthed, blockedError }) {
+function AuthScreen({ client, onAuthed, blockedError, onCandidateLoggedIn }) {
+  const [mode, setMode] = useState("staff"); // staff | candidate
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [loading, setLoading] = useState(false);
   const [err, setErr] = useState("");
 
+  const [cName, setCName] = useState("");
+  const [cPin, setCPin] = useState("");
+  const [cErr, setCErr] = useState("");
+  const [cLoading, setCLoading] = useState(false);
+
   const submit = async () => {
     setErr("");
     const em = email.trim();
     if (!em || !password) {
-      setErr("Email aur password dono bharo.");
+      setErr("Enter both email and password.");
       return;
     }
     if (password.length < 6) {
@@ -2575,206 +2579,188 @@ function AuthScreen({ client, onAuthed, blockedError }) {
         onAuthed();
       }
     } catch (e) {
-      setErr("Kuch galat ho gaya: " + (e && e.message ? e.message : e));
+      setErr("Something went wrong: " + (e && e.message ? e.message : e));
     } finally {
       setLoading(false);
+    }
+  };
+
+  const submitCandidate = async () => {
+    setCErr("");
+    if (!cName.trim() || cPin.length !== 4) return;
+    setCLoading(true);
+    try {
+      const { data, error } = await client.rpc("find_checkin_student", { p_name: cName.trim(), p_pin: cPin, p_date: todayISO() });
+      if (error) {
+        setCErr("Something went wrong — try again.");
+      } else if (!data || data.found === false) {
+        setCErr("Name or PIN did not match.");
+      } else {
+        onCandidateLoggedIn({ name: cName.trim(), pin: cPin, classInfo: data });
+      }
+    } catch (e) {
+      setCErr("Something went wrong: " + (e && e.message ? e.message : e));
+    } finally {
+      setCLoading(false);
     }
   };
 
   return (
     <div style={authStyles.wrap}>
       <div style={authStyles.card}>
-        <div style={authStyles.title}>उपस्थिति रजिस्टर</div>
-        <div style={authStyles.subtitle}>Login karke apna attendance data access karo</div>
+        <div style={authStyles.title}>ATTENDANCE REGISTER</div>
+        <div style={authStyles.tabRow}>
+          <button style={{ ...authStyles.tabBtn, ...(mode === "staff" ? authStyles.tabBtnActive : {}) }} onClick={() => setMode("staff")}>Admin/Custodian</button>
+          <button style={{ ...authStyles.tabBtn, ...(mode === "candidate" ? authStyles.tabBtnActive : {}) }} onClick={() => setMode("candidate")}>Candidate</button>
+        </div>
 
-        <input style={authStyles.input} type="email" placeholder="Email" value={email} onChange={(e) => setEmail(e.target.value)}
-          onKeyDown={(e) => e.key === "Enter" && submit()} autoCapitalize="off" autoCorrect="off" />
-        <input style={authStyles.input} type="password" placeholder="Password" value={password} onChange={(e) => setPassword(e.target.value)}
-          onKeyDown={(e) => e.key === "Enter" && submit()} />
+        {mode === "staff" ? (
+          <>
+            <div style={authStyles.subtitle}>Log in to access your attendance data</div>
+            <input style={authStyles.input} type="email" placeholder="Email" value={email} onChange={(e) => setEmail(e.target.value)}
+              onKeyDown={(e) => e.key === "Enter" && submit()} autoCapitalize="off" autoCorrect="off" />
+            <input style={authStyles.input} type="password" placeholder="Password" value={password} onChange={(e) => setPassword(e.target.value)}
+              onKeyDown={(e) => e.key === "Enter" && submit()} />
 
-        {err && <div style={authStyles.error}>{err}</div>}
-        {blockedError && <div style={authStyles.error}>{blockedError}</div>}
+            {err && <div style={authStyles.error}>{err}</div>}
+            {blockedError && <div style={authStyles.error}>{blockedError}</div>}
 
-        <button style={authStyles.primaryBtn} onClick={submit} disabled={loading}>
-          {loading ? "Please wait…" : "Login"}
-        </button>
+            <button style={authStyles.primaryBtn} onClick={submit} disabled={loading}>
+              {loading ? "Please wait…" : "Login"}
+            </button>
+          </>
+        ) : (
+          <>
+            <div style={authStyles.subtitle}>Enter your name and 4-digit PIN</div>
+            <input style={authStyles.input} placeholder="Your full name" value={cName} onChange={(e) => setCName(e.target.value)}
+              onKeyDown={(e) => e.key === "Enter" && cPin.length === 4 && submitCandidate()} autoFocus />
+            <input style={{ ...authStyles.input, textAlign: "center", letterSpacing: 8 }} type="password" inputMode="numeric" maxLength={4}
+              placeholder="PIN" value={cPin} onChange={(e) => setCPin(e.target.value.replace(/\D/g, "").slice(0, 4))}
+              onKeyDown={(e) => e.key === "Enter" && submitCandidate()} />
 
-        <a href="?checkin=" style={authStyles.checkinLink}>🎓 Candidate ho? Yahan apni attendance lagao</a>
+            {cErr && <div style={authStyles.error}>{cErr}</div>}
+
+            <button style={authStyles.primaryBtn} onClick={submitCandidate} disabled={cLoading || !cName.trim() || cPin.length !== 4}>
+              {cLoading ? "Please wait…" : "Login"}
+            </button>
+          </>
+        )}
       </div>
     </div>
   );
 }
 
-function SelfCheckinScreen({ client }) {
-  const initialCode = (new URLSearchParams(window.location.search).get("checkin") || "").trim().toUpperCase();
-  const [code, setCode] = useState(initialCode);
-  const [name, setName] = useState("");
-  const [pin, setPin] = useState("");
-  // code | form | geochecking | selfie | submitting | success | error
-  const [stage, setStage] = useState(initialCode ? "form" : "code");
-  const [message, setMessage] = useState("");
-  const [busy, setBusy] = useState(false);
-  const [classInfo, setClassInfo] = useState(null); // { found, className, geoCenter, geoRadius }
-  const [coords, setCoords] = useState(null); // { lat, lng } once geo-checked ok
 
-  const goBack = () => { window.location.href = window.location.pathname; };
+function CandidateSelfScreen({ client, candidate, onLogout }) {
+  // geochecking | ready | selfie | submitting | success | already | error
+  const alreadyMarked = candidate.classInfo && candidate.classInfo.alreadyPresent;
+  const [stage, setStage] = useState(alreadyMarked ? "already" : "ready");
+  const [message, setMessage] = useState(
+    alreadyMarked ? `You're already marked Present today${candidate.classInfo.presentTime ? ` (${candidate.classInfo.presentTime})` : ""}.` : ""
+  );
+  const [coords, setCoords] = useState(null);
 
-  const loadClassInfo = async (clean) => {
-    try {
-      const { data, error } = await client.rpc("get_checkin_class_info", { p_code: clean });
-      if (!error && data) setClassInfo(data);
-    } catch (e) {
-      // agar ye fail ho jaaye to bhi form dikhta rahega, geo-check bas skip ho jayega
-    }
-  };
+  const needsGeo = candidate.classInfo && candidate.classInfo.locationOn !== false && candidate.classInfo.geoCenter && candidate.classInfo.geoCenter.lat != null;
+  const needsSelfie = !candidate.classInfo || candidate.classInfo.selfieOn !== false;
 
-  useEffect(() => {
-    if (initialCode) loadClassInfo(initialCode);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
-
-  const submitCode = () => {
-    const clean = code.trim().toUpperCase();
-    if (!clean) return;
-    setCode(clean);
-    setStage("form");
-    loadClassInfo(clean);
-  };
-
-  // "Present maaro" dabane par: pehle location check (agar class ke liye geo-fence set hai), fir selfie
   const startCheckin = async () => {
-    if (!name.trim() || pin.length !== 4) return;
     setMessage("");
-
-    const needsGeo = classInfo && classInfo.found && classInfo.geoCenter && classInfo.geoCenter.lat != null;
-
     if (needsGeo) {
       setStage("geochecking");
       try {
         const pos = await getCurrentPositionAsync();
         const dist = distanceMeters(
           pos.coords.latitude, pos.coords.longitude,
-          classInfo.geoCenter.lat, classInfo.geoCenter.lng
+          candidate.classInfo.geoCenter.lat, candidate.classInfo.geoCenter.lng
         );
-        if (dist > (classInfo.geoRadius || 150)) {
-          setMessage("Aap classroom area ke bahar ho — paas jaake dobara try karo.");
+        if (dist > (candidate.classInfo.geoRadius || 150)) {
+          setMessage("You are outside the classroom area — move closer and try again.");
           setStage("error");
           return;
         }
         setCoords({ lat: pos.coords.latitude, lng: pos.coords.longitude });
       } catch (err) {
-        setMessage("Location access nahi mil paaya — permission on karke dobara try karo.");
+        setMessage("Could not get location access — turn on permission and try again.");
         setStage("error");
         return;
       }
     } else {
       setCoords(null);
     }
-
-    setStage("selfie");
+    if (needsSelfie) {
+      setStage("selfie");
+    } else {
+      finishCheckin(null);
+    }
   };
 
   const finishCheckin = async (selfieDataUrl) => {
     setStage("submitting");
-    setBusy(true);
     setMessage("");
     try {
       const dateStr = todayISO();
       const timeStr = new Date().toLocaleTimeString("en-IN", { hour: "2-digit", minute: "2-digit", hour12: true });
-      const { data, error } = await client.rpc("self_checkin", {
-        p_code: code, p_name: name.trim(), p_pin: pin, p_date: dateStr, p_time: timeStr,
+      const { data, error } = await client.rpc("self_checkin_by_pin", {
+        p_name: candidate.name, p_pin: candidate.pin, p_date: dateStr, p_time: timeStr,
         p_lat: coords ? coords.lat : null, p_lng: coords ? coords.lng : null,
         p_selfie: selfieDataUrl || null,
       });
       if (error) {
-        setMessage("Kuch gadbad ho gayi — dobara try karo. [" + error.message + "]");
+        setMessage("Something went wrong — try again. [" + error.message + "]");
         setStage("error");
+      } else if (data && data.alreadyPresent) {
+        setMessage(`You're already marked Present today${data.time ? ` (${data.time})` : ""}.`);
+        setStage("already");
       } else if (data && data.success) {
-        setMessage(`${data.name} ki attendance lag gayi ✅`);
+        setMessage(`${data.name}'s attendance is marked ✅`);
         setStage("success");
       } else {
-        setMessage((data && data.message) || "Naam ya PIN match nahi hua.");
+        setMessage((data && data.message) || "Name or PIN did not match.");
         setStage("error");
       }
     } catch (e) {
-      setMessage("Kuch galat ho gaya: " + (e && e.message ? e.message : e));
+      setMessage("Something went wrong: " + (e && e.message ? e.message : e));
       setStage("error");
     }
-    setBusy(false);
   };
 
   return (
     <div style={authStyles.wrap}>
       <div style={authStyles.card}>
-        <div style={authStyles.title}>🎓 Apni Attendance</div>
-        <div style={authStyles.subtitle}>
-          {stage === "code" && "Class ka code daalo (jo aapke custodian ne diya hai)."}
-          {stage === "form" && "Apna poora naam aur 4-digit PIN daalo."}
-          {stage === "geochecking" && "Location check ho raha hai…"}
-          {stage === "selfie" && "Ab selfie proof do."}
-          {stage === "submitting" && "Attendance lagayi ja rahi hai…"}
-          {stage === "success" && "Ho gaya!"}
-          {stage === "error" && "Nahi ho paaya."}
-        </div>
+        <div style={authStyles.title}>🎓 {candidate.name}</div>
 
-        {stage === "code" && (
+        {stage === "ready" && (
           <>
-            <input style={{ ...authStyles.input, textAlign: "center", letterSpacing: 3, textTransform: "uppercase" }} placeholder="CODE"
-              value={code} onChange={(e) => setCode(e.target.value.toUpperCase())} onKeyDown={(e) => e.key === "Enter" && submitCode()} />
-            <button style={authStyles.primaryBtn} onClick={submitCode} disabled={!code.trim()}>Aage badho</button>
-          </>
-        )}
-
-        {stage === "form" && (
-          <>
-            <input style={authStyles.input} placeholder="Apna poora naam" value={name}
-              onChange={(e) => setName(e.target.value)} onKeyDown={(e) => e.key === "Enter" && pin.length === 4 && startCheckin()} autoFocus />
-            <input style={{ ...authStyles.input, textAlign: "center", letterSpacing: 8 }} type="password" inputMode="numeric" maxLength={4}
-              placeholder="PIN" value={pin} onChange={(e) => setPin(e.target.value.replace(/\D/g, "").slice(0, 4))}
-              onKeyDown={(e) => e.key === "Enter" && startCheckin()} />
-            {classInfo && classInfo.found && classInfo.geoCenter && classInfo.geoCenter.lat != null && (
-              <div style={authStyles.info}><MapPin size={13} style={{ verticalAlign: -2, marginRight: 5 }} />Location check hoga — paas hi rehna.</div>
-            )}
             {message && <div style={authStyles.error}>{message}</div>}
-            <button style={authStyles.primaryBtn} onClick={startCheckin} disabled={busy || !name.trim() || pin.length !== 4}>
-              Present maaro
-            </button>
+            <button style={authStyles.primaryBtn} onClick={startCheckin}>Mark Present</button>
           </>
         )}
 
-        {stage === "geochecking" && (
-          <div style={authStyles.info}>📍 Aapki location check ki ja rahi hai, thoda ruko…</div>
-        )}
-
-        {stage === "submitting" && (
-          <div style={authStyles.info}>⏳ Please wait…</div>
-        )}
-
-        {stage === "success" && (
-          <div style={authStyles.checkinSuccessBox}>✅ {message}</div>
-        )}
+        {stage === "geochecking" && <div style={authStyles.info}>📍 Checking your location, please wait…</div>}
+        {stage === "submitting" && <div style={authStyles.info}>⏳ Please wait…</div>}
+        {stage === "success" && <div style={authStyles.checkinSuccessBox}>✅ {message}</div>}
+        {stage === "already" && <div style={authStyles.info}>ℹ️ {message}</div>}
         {stage === "error" && (
           <>
             <div style={authStyles.error}>{message}</div>
-            <button style={authStyles.primaryBtn} onClick={() => setStage("form")}>Dobara try karo</button>
+            <button style={authStyles.primaryBtn} onClick={() => setStage("ready")}>Try again</button>
           </>
         )}
 
-        <a href="#" onClick={(e) => { e.preventDefault(); goBack(); }} style={authStyles.checkinLink}>← Wapas login par jao</a>
+        <a href="#" onClick={(e) => { e.preventDefault(); onLogout(); }} style={authStyles.checkinLink}>← Logout</a>
       </div>
 
       {stage === "selfie" && (
         <SelfieCaptureModal
-          studentName={name.trim() || "Aapki"}
+          studentName={candidate.name}
           onCapture={(dataUrl) => finishCheckin(dataUrl)}
-          onCancel={() => setStage("form")}
+          onCancel={() => setStage("ready")}
         />
       )}
     </div>
   );
 }
 
-/* ---------------- catches crashes mid-session so the app never goes fully blank ---------------- */
 class ErrorBoundary extends React.Component {
   constructor(props) {
     super(props);
@@ -2791,7 +2777,7 @@ class ErrorBoundary extends React.Component {
       const msg = (this.state.error && this.state.error.message) ? this.state.error.message : String(this.state.error);
       return (
         <div style={{ maxWidth: 640, margin: "24px auto", padding: "18px 20px", background: "#fdece7", border: "1px solid #f0cfc5", borderRadius: 10, color: "#7a2f20", fontFamily: "'Inter', sans-serif" }}>
-          <div style={{ fontWeight: 700, fontSize: 14, marginBottom: 8 }}>Kuch gadbad ho gayi — app crash ho gaya.</div>
+          <div style={{ fontWeight: 700, fontSize: 14, marginBottom: 8 }}>Something went wrong — the app crashed.</div>
           <div style={{ whiteSpace: "pre-wrap", fontSize: 12.5, fontFamily: "'IBM Plex Mono', monospace", marginBottom: 14, lineHeight: 1.5 }}>{msg}</div>
           <button
             onClick={() => window.location.reload()}
@@ -2816,6 +2802,7 @@ function Root() {
   const [checkingConfig, setCheckingConfig] = useState(true);
   const [teacherOptions, setTeacherOptions] = useState([]);
   const [viewAsUserId, setViewAsUserId] = useState(""); // "" = apna data, otherwise a teacher's user id
+  const [candidate, setCandidate] = useState(null); // { name, pin, classInfo } once candidate-logged-in
 
   useEffect(() => {
     if (EMBEDDED_SUPABASE_URL && EMBEDDED_SUPABASE_ANON_KEY) {
@@ -2866,7 +2853,7 @@ function Root() {
         return;
       }
       if (existingErr) {
-        setAuthBlockedMsg("Profile check me error aayi. [Debug: " + existingErr.message + (existingErr.code ? " (code: " + existingErr.code + ")" : "") + "]");
+        setAuthBlockedMsg("Error while checking profile. [Debug: " + existingErr.message + (existingErr.code ? " (code: " + existingErr.code + ")" : "") + "]");
         await client.auth.signOut();
         setProfile(null);
         setSession(null);
@@ -2895,8 +2882,8 @@ function Root() {
         }
       }
       {
-        const detail = insertErr ? (insertErr.message + (insertErr.code ? " (code: " + insertErr.code + ")" : "")) : "Row insert nahi hui.";
-        setAuthBlockedMsg("Ye account admin dwara authorize nahi hai. Apne school admin se apna Entities Custodian login banwao. [Debug: " + detail + "]");
+        const detail = insertErr ? (insertErr.message + (insertErr.code ? " (code: " + insertErr.code + ")" : "")) : "Row was not inserted.";
+        setAuthBlockedMsg("This account is not authorized by admin. Ask your school admin to create your Entity Custodian login. [Debug: " + detail + "]");
         await client.auth.signOut();
         setProfile(null);
         setSession(null);
@@ -2913,7 +2900,7 @@ function Root() {
     const revalidate = async () => {
       const { data: still, error } = await client.from("profiles").select("*").eq("id", session.user.id).maybeSingle();
       if (error || !still) {
-        setAuthBlockedMsg("Aapka access admin ne hata diya hai. Apne school admin se sampark karein.");
+        setAuthBlockedMsg("Your access has been removed by admin. Please contact your school admin.");
         await client.auth.signOut();
         setProfile(null);
         setSession(null);
@@ -2960,7 +2947,7 @@ function Root() {
       <div style={authStyles.wrap}>
         <div style={authStyles.card}>
           <div style={authStyles.title}>Supabase Not Configured</div>
-          <div style={authStyles.subtitle}>App abhi kisi Supabase project se connect nahi hai. Developer ko URL aur anon key set karne hain.</div>
+          <div style={authStyles.subtitle}>The app isn't connected to a Supabase project yet. The developer needs to set the URL and anon key.</div>
         </div>
       </div>
     );
@@ -2968,18 +2955,18 @@ function Root() {
 
   if (!client || session === undefined) return null;
 
-  if (new URLSearchParams(window.location.search).has("checkin")) {
-    return <SelfCheckinScreen client={client} />;
+  if (candidate) {
+    return <CandidateSelfScreen client={client} candidate={candidate} onLogout={() => setCandidate(null)} />;
   }
 
   if (!session) {
-    return <AuthScreen client={client} onAuthed={() => setAuthBlockedMsg("")} blockedError={authBlockedMsg} />;
+    return <AuthScreen client={client} onAuthed={() => setAuthBlockedMsg("")} blockedError={authBlockedMsg} onCandidateLoggedIn={setCandidate} />;
   }
 
   if (profile === undefined) return null; // checking profile/role
 
   if (!profile) {
-    return <AuthScreen client={client} onAuthed={() => setAuthBlockedMsg("")} blockedError={authBlockedMsg} />;
+    return <AuthScreen client={client} onAuthed={() => setAuthBlockedMsg("")} blockedError={authBlockedMsg} onCandidateLoggedIn={setCandidate} />;
   }
 
   const effectiveUserId = (profile.role === "admin" && viewAsUserId) ? viewAsUserId : session.user.id;
@@ -3031,8 +3018,8 @@ const authStyles = {
   guestTitle: { fontSize: 13, fontWeight: 700, color: "#6B4226", marginBottom: 4 },
   error: { background: "#fdece7", color: "#C1503D", border: "1px solid #f0cfc5", borderRadius: 8, padding: "8px 10px", fontSize: 12, marginBottom: 10 },
   info: { background: "#eaf3ec", color: "#2f5c3c", border: "1px solid #cfe3d5", borderRadius: 8, padding: "8px 10px", fontSize: 12, marginBottom: 10 },
-  checkinLink: { display: "block", textAlign: "center", marginTop: 16, fontSize: 12.5, color: "#4A6FA5", fontFamily: "'Inter', sans-serif", textDecoration: "underline" },
   checkinSuccessBox: { background: "#eaf3ec", color: "#2f5c3c", border: "1px solid #cfe3d5", borderRadius: 10, padding: "16px 14px", fontSize: 14, fontWeight: 700, textAlign: "center", marginBottom: 10 },
+  checkinLink: { display: "block", textAlign: "center", marginTop: 16, fontSize: 12.5, color: "#4A6FA5", fontFamily: "'Inter', sans-serif", textDecoration: "underline" },
   stepBlock: { marginBottom: 16 },
   stepTitle: { fontSize: 13, fontWeight: 700, color: "#6B4226", marginBottom: 4 },
   stepText: { fontSize: 12, color: "#8a8368", marginBottom: 8, lineHeight: 1.5 },
