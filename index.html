@@ -233,7 +233,7 @@ const pruneOldSelfies = (selfies) => {
   return result;
 };
 
-const blankClass = (name = "") => ({ id: newId("c"), className: name, teacher: "", students: [], attendance: {}, holidays: {}, attendanceTimes: {}, attendanceSelfies: {}, lateTime: "", geoCenter: null, geoRadius: 150, selfieOn: true, locationOn: true });
+const blankClass = (name = "") => ({ id: newId("c"), className: name, teacher: "", students: [], attendance: {}, holidays: {}, attendanceTimes: {}, attendanceSelfies: {}, lateTime: "", lateTimeHistory: [], geoCenter: null, geoRadius: 150, selfieOn: true, locationOn: true });
 const normalizeClasses = (list) =>
   (list || []).map((c) => ({
     ...c,
@@ -242,6 +242,7 @@ const normalizeClasses = (list) =>
     attendanceTimes: c.attendanceTimes || {},
     attendanceSelfies: pruneOldSelfies(c.attendanceSelfies || {}),
     lateTime: c.lateTime || "",
+    lateTimeHistory: Array.isArray(c.lateTimeHistory) ? c.lateTimeHistory : [],
     geoCenter: c.geoCenter || null,
     geoRadius: c.geoRadius || 150,
     selfieOn: c.selfieOn !== false,
@@ -284,6 +285,20 @@ const isLateStamp = (stampedTime, lateTimeStr) => {
   const lateMinutes = parseInt(lm[1], 10) * 60 + parseInt(lm[2], 10);
   const stampMinutes = parseTimeToMinutes(stampedTime);
   return stampMinutes !== null && stampMinutes > lateMinutes;
+};
+// jab bhi "Mark Late after this time" setting change hoti hai, uska ek history
+// entry ban jata hai (us din ki date + naya time). Kisi bhi purani date (dateStr)
+// ke liye late-cutoff nikalna ho to us date se pehle/us din set hui sabse aakhri
+// history entry use hoti hai — isliye setting change karne par sirf usi din se
+// aage ke count par asar padta hai, pichhle dino ka result waisa hi rehta hai.
+const getLateTimeForDate = (history, currentLateTime, dateStr) => {
+  if (!Array.isArray(history) || history.length === 0) return currentLateTime || "";
+  let resolved = "";
+  for (const entry of history) {
+    if (entry.effectiveFrom <= dateStr) resolved = entry.time;
+    else break;
+  }
+  return resolved;
 };
 
 /* ---------------- searchable student picker (replaces plain <select> where lists can get long) ---------------- */
@@ -733,6 +748,7 @@ function AttendanceApp({ userEmail, onLogout, isGuest, isAdmin, canImport, clien
   const attendanceTimes = activeClass ? (activeClass.attendanceTimes || {}) : {};
   const attendanceSelfies = activeClass ? (activeClass.attendanceSelfies || {}) : {};
   const lateTime = activeClass ? (activeClass.lateTime || "") : "";
+  const lateTimeHistory = activeClass ? (activeClass.lateTimeHistory || []) : [];
   const geoCenter = activeClass ? (activeClass.geoCenter || null) : null;
   const geoRadius = activeClass ? (activeClass.geoRadius || 150) : 150;
   const selfieOn = activeClass ? (activeClass.selfieOn !== false) : true;
@@ -757,7 +773,22 @@ function AttendanceApp({ userEmail, onLogout, isGuest, isAdmin, canImport, clien
     updateActive((c) => ({ attendanceTimes: typeof updater === "function" ? updater(c.attendanceTimes || {}) : updater }));
   const setAttendanceSelfies = (updater) =>
     updateActive((c) => ({ attendanceSelfies: typeof updater === "function" ? updater(c.attendanceSelfies || {}) : updater }));
-  const setLateTime = (val) => updateActive(() => ({ lateTime: val }));
+  const setLateTime = (val) =>
+    updateActive((c) => {
+      const today = todayISO();
+      let history = Array.isArray(c.lateTimeHistory) ? [...c.lateTimeHistory] : [];
+      // Pehli baar history ban rahi hai aur class me pehle se koi lateTime set tha,
+      // to us purane value ko history ke bilkul shuru me seed kar dete hain — taaki
+      // ab tak ke sabhi pichhle dino ka late-calculation waisa hi rahe jaisa pehle tha.
+      if (history.length === 0 && c.lateTime) {
+        history.push({ effectiveFrom: "0000-01-01", time: c.lateTime });
+      }
+      const idx = history.findIndex((h) => h.effectiveFrom === today);
+      if (idx >= 0) history[idx] = { effectiveFrom: today, time: val };
+      else history.push({ effectiveFrom: today, time: val });
+      history.sort((a, b) => a.effectiveFrom.localeCompare(b.effectiveFrom));
+      return { lateTime: val, lateTimeHistory: history };
+    });
   const setGeoCenter = (val) => updateActive(() => ({ geoCenter: val }));
   const setGeoRadius = (val) => updateActive(() => ({ geoRadius: val }));
   const setSelfieOn = (val) => updateActive(() => ({ selfieOn: val }));
@@ -1413,7 +1444,8 @@ function AttendanceApp({ userEmail, onLogout, isGuest, isAdmin, canImport, clien
         if (st === "P") {
           totalPresent++;
           const stampedTime = attendanceTimes[dateStr] && attendanceTimes[dateStr][s.id];
-          if (isLateStamp(stampedTime, lateTime)) lateCount++;
+          const effLateTime = getLateTimeForDate(lateTimeHistory, lateTime, dateStr);
+          if (isLateStamp(stampedTime, effLateTime)) lateCount++;
         } else if (st === "A") {
           absentCount++;
         }
@@ -1421,7 +1453,7 @@ function AttendanceApp({ userEmail, onLogout, isGuest, isAdmin, canImport, clien
       }
       return { ...s, days, totalPresent, absentCount, lateCount };
     });
-  }, [students, selectedMonth, daysInSelectedMonth, attendance, attendanceTimes, lateTime]);
+  }, [students, selectedMonth, daysInSelectedMonth, attendance, attendanceTimes, lateTime, lateTimeHistory]);
 
   const studentDayList = useMemo(() => {
     if (!selectedStudentId) return [];
@@ -1438,11 +1470,11 @@ function AttendanceApp({ userEmail, onLogout, isGuest, isAdmin, canImport, clien
         weekday: WEEKDAY_SHORT[dObj.getDay()],
         status: st || null,
         time: stampedTime,
-        late: stampedTime ? isLateStamp(stampedTime, lateTime) : false,
+        late: stampedTime ? isLateStamp(stampedTime, getLateTimeForDate(lateTimeHistory, lateTime, dateStr)) : false,
       });
     }
     return rows;
-  }, [selectedStudentId, selectedMonth, daysInSelectedMonth, attendance, attendanceTimes, lateTime]); // eslint-disable-line
+  }, [selectedStudentId, selectedMonth, daysInSelectedMonth, attendance, attendanceTimes, lateTime, lateTimeHistory]); // eslint-disable-line
 
   const studentAbsentDates = useMemo(() => {
     if (!selectedStudentId) return [];
@@ -2194,7 +2226,7 @@ function AttendanceApp({ userEmail, onLogout, isGuest, isAdmin, canImport, clien
                           </div>
                           {teacherMode && st === "P" && attendanceTimes[selectedDate] && attendanceTimes[selectedDate][s.id] && (() => {
                             const stampedTime = attendanceTimes[selectedDate][s.id];
-                            const late = isLateStamp(stampedTime, lateTime);
+                            const late = isLateStamp(stampedTime, getLateTimeForDate(lateTimeHistory, lateTime, selectedDate));
                             return (
                               <div style={late ? styles.studentTimeTagLate : styles.studentTimeTag}>
                                 🕐 {stampedTime}{late && " · Late"}
