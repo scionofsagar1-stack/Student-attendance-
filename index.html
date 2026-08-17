@@ -100,7 +100,7 @@
 <script type="text/plain" id="app-source">
 const { useState, useEffect, useRef, useMemo } = React;
 
-// Class delete ke liye Admin PIN (device-level). Admin isko header se badal sakta hai.
+// Admin PIN for deleting a class (device-level). Admin can change this from the header.
 const DELETE_PIN_KEY = "attendance-app-delete-pin";
 const DEFAULT_DELETE_PIN = "1234";
 
@@ -147,6 +147,7 @@ const BookOpen = makeIcon(<>
 </>);
 const ChevronLeft = makeIcon(<path d="m15 18-6-6 6-6" />);
 const ChevronRight = makeIcon(<path d="m9 18 6-6-6-6" />);
+const ChevronDown = makeIcon(<path d="m6 9 6 6 6-6" />);
 const UserPlus = makeIcon(<>
   <path d="M2 21a8 8 0 0 1 13.292-6" />
   <circle cx="10" cy="8" r="5" />
@@ -245,6 +246,7 @@ const normalizeClasses = (list) =>
     geoRadius: c.geoRadius || 150,
     selfieOn: c.selfieOn !== false,
     locationOn: c.locationOn !== false,
+    checkinCode: c.checkinCode || "",
   }));
 
 // distance (meters) between two lat/lng points
@@ -372,15 +374,23 @@ function GeoFenceMap({ lat, lng, radius }) {
   const containerRef = useRef(null);
   const markerRef = useRef(null);
   const circleRef = useRef(null);
+  const streetLayerRef = useRef(null);
+  const satLayerRef = useRef(null);
+  const [satellite, setSatellite] = useState(false);
 
   useEffect(() => {
     if (!containerRef.current || typeof L === "undefined") return;
     if (!mapRef.current) {
       mapRef.current = L.map(containerRef.current, { attributionControl: true, zoomControl: true }).setView([lat, lng], 17);
-      L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
+      streetLayerRef.current = L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
         maxZoom: 19,
         attribution: "© OpenStreetMap contributors",
-      }).addTo(mapRef.current);
+      });
+      satLayerRef.current = L.tileLayer("https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}", {
+        maxZoom: 19,
+        attribution: "Tiles © Esri",
+      });
+      (satellite ? satLayerRef.current : streetLayerRef.current).addTo(mapRef.current);
       markerRef.current = L.marker([lat, lng]).addTo(mapRef.current);
       circleRef.current = L.circle([lat, lng], { radius, color: "#4C8C5B", fillColor: "#4C8C5B", fillOpacity: 0.15 }).addTo(mapRef.current);
     } else {
@@ -399,7 +409,39 @@ function GeoFenceMap({ lat, lng, radius }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [lat, lng, radius]);
 
-  return <div ref={containerRef} style={{ width: "100%", height: 220, borderRadius: 10, overflow: "hidden", border: "1px solid #d8cfa8", marginTop: 6 }} />;
+  const toggleSatellite = () => {
+    setSatellite((prev) => {
+      const next = !prev;
+      if (mapRef.current && streetLayerRef.current && satLayerRef.current) {
+        if (next) {
+          mapRef.current.removeLayer(streetLayerRef.current);
+          satLayerRef.current.addTo(mapRef.current);
+        } else {
+          mapRef.current.removeLayer(satLayerRef.current);
+          streetLayerRef.current.addTo(mapRef.current);
+        }
+      }
+      return next;
+    });
+  };
+
+  return (
+    <div style={{ position: "relative" }}>
+      <div ref={containerRef} style={{ width: "100%", height: 220, borderRadius: 10, overflow: "hidden", border: "1px solid #d8cfa8", marginTop: 6 }} />
+      <button
+        type="button"
+        onClick={toggleSatellite}
+        style={{
+          position: "absolute", top: 12, right: 8, zIndex: 1000,
+          background: "#fffdf7", border: "1px solid #d8cfa8", borderRadius: 6,
+          padding: "4px 9px", fontSize: 12, fontWeight: 600, color: "#5a4520",
+          cursor: "pointer", boxShadow: "0 1px 3px rgba(0,0,0,0.2)",
+        }}
+      >
+        {satellite ? "🗺️ Street" : "🛰️ Satellite"}
+      </button>
+    </div>
+  );
 }
 
 /* ---------------- simple camera selfie capture (proof photo, no liveness claim) ---------------- */
@@ -540,7 +582,7 @@ function PinPromptModal({ studentName, expectedPin, mode, isAdminPin, onSuccess,
   );
 }
 
-function AttendanceApp({ userEmail, onLogout, isGuest, isAdmin, client, signupClient, teacherOptions = [], viewAsUserId, onChangeViewAs, viewingTeacherEmail, lockedTimeMode }) {
+function AttendanceApp({ userEmail, onLogout, isGuest, isAdmin, canImport, client, signupClient, teacherOptions = [], viewAsUserId, onChangeViewAs, viewingTeacherEmail, lockedTimeMode }) {
   const [loaded, setLoaded] = useState(false);
   const [classes, setClasses] = useState([]);
   const [activeClassId, setActiveClassId] = useState(null);
@@ -550,16 +592,32 @@ function AttendanceApp({ userEmail, onLogout, isGuest, isAdmin, client, signupCl
   const [classFieldDraft, setClassFieldDraft] = useState("");
   const [enrollSearch, setEnrollSearch] = useState("");
   const [registerSearch, setRegisterSearch] = useState("");
+  const [showImportPanel, setShowImportPanel] = useState(false);
+  const [importTableName, setImportTableName] = useState("students");
+  const [importTableNameLoaded, setImportTableNameLoaded] = useState(false);
+  const [importCandidates, setImportCandidates] = useState([]);
+  const [importLoading, setImportLoading] = useState(false);
+  const [importError, setImportError] = useState("");
+  const [importSearch, setImportSearch] = useState("");
+  const [importClassFilter, setImportClassFilter] = useState("all");
+  const [importSectionFilter, setImportSectionFilter] = useState("all");
+  const [importAddressFilter, setImportAddressFilter] = useState("all");
+  const [importSelectedIds, setImportSelectedIds] = useState(new Set());
+  const [expandedImportId, setExpandedImportId] = useState(null);
+  const [expandedEnrolledId, setExpandedEnrolledId] = useState(null);
   const [showHolidayForm, setShowHolidayForm] = useState(false);
   const [holidayDraft, setHolidayDraft] = useState("");
   const [gridSearch, setGridSearch] = useState("");
 
   const [showTeacherPanel, setShowTeacherPanel] = useState(false);
   const [teacherAccounts, setTeacherAccounts] = useState([]);
-  const [teacherForm, setTeacherForm] = useState({ email: "", password: "", timeMode: false });
+  const [teacherForm, setTeacherForm] = useState({ email: "", password: "", timeMode: false, canImport: false });
   const [teacherPanelError, setTeacherPanelError] = useState("");
   const [teacherSaving, setTeacherSaving] = useState(false);
   const [teacherLastCreated, setTeacherLastCreated] = useState(null);
+  const [exportEnabled, setExportEnabled] = useState(false);
+  const [exportLoading, setExportLoading] = useState(false);
+  const [exportError, setExportError] = useState("");
 
   const [selectedDate, setSelectedDate] = useState(todayISO());
   const [selectedMonth, setSelectedMonth] = useState(currentMonthStr());
@@ -647,6 +705,26 @@ function AttendanceApp({ userEmail, onLogout, isGuest, isAdmin, client, signupCl
     })();
   }, [classes, activeClassId, loaded]);
 
+  // ---- Import-source table name (the Supabase table another app, like the
+  // fee register, writes candidate data into) — remembered per-user via the
+  // same app_storage key/value store everything else here uses, so it
+  // doesn't need to be re-typed every time the Import panel is opened. ----
+  useEffect(() => {
+    (async () => {
+      try {
+        const res = await window.storage.get("import_source_table", false);
+        if (res && res.value) setImportTableName(JSON.parse(res.value));
+      } catch (e) { /* not saved yet — default stays */ }
+      setImportTableNameLoaded(true);
+    })();
+  }, []);
+  useEffect(() => {
+    if (!importTableNameLoaded) return;
+    (async () => {
+      try { await window.storage.set("import_source_table", JSON.stringify(importTableName), false); } catch (e) { /* ignore */ }
+    })();
+  }, [importTableName, importTableNameLoaded]);
+
   const activeClass = classes.find((c) => c.id === activeClassId) || null;
   const students = activeClass ? activeClass.students : [];
   const activeStudents = students.filter((s) => s.active !== false);
@@ -659,6 +737,7 @@ function AttendanceApp({ userEmail, onLogout, isGuest, isAdmin, client, signupCl
   const geoRadius = activeClass ? (activeClass.geoRadius || 150) : 150;
   const selfieOn = activeClass ? (activeClass.selfieOn !== false) : true;
   const locationOn = activeClass ? (activeClass.locationOn !== false) : true;
+  const checkinCode = activeClass ? (activeClass.checkinCode || "") : "";
   const classInfo = { className: activeClass ? activeClass.className : "", teacher: activeClass ? activeClass.teacher : "" };
 
   const matchesSearch = (s, q) => !q.trim() || s.name.toLowerCase().includes(q.trim().toLowerCase()) || String(s.roll).toLowerCase().includes(q.trim().toLowerCase());
@@ -683,6 +762,7 @@ function AttendanceApp({ userEmail, onLogout, isGuest, isAdmin, client, signupCl
   const setGeoRadius = (val) => updateActive(() => ({ geoRadius: val }));
   const setSelfieOn = (val) => updateActive(() => ({ selfieOn: val }));
   const setLocationOn = (val) => updateActive(() => ({ locationOn: val }));
+  const setCheckinOn = (val) => updateActive(() => ({ checkinCode: val ? (newId("chk")) : "" }));
   const toggleHoliday = (dateStr, label) => {
     setHolidays((prev) => {
       const next = { ...prev };
@@ -822,13 +902,13 @@ function AttendanceApp({ userEmail, onLogout, isGuest, isAdmin, client, signupCl
       return;
     }
     const { error: profileError } = await client.from("profiles").insert({
-      id: signUpData.user.id, email, role: "teacher", time_mode: teacherForm.timeMode,
+      id: signUpData.user.id, email, role: "teacher", time_mode: teacherForm.timeMode, can_import: teacherForm.canImport,
     });
     if (profileError) {
-      setTeacherPanelError("Account was created but the profile could not be saved — check the 'profiles' table in Supabase.");
+      setTeacherPanelError(`Account was created but the profile could not be saved — ${profileError.message}${profileError.code ? " (code: " + profileError.code + ")" : ""}`);
     } else {
       setTeacherLastCreated({ email, password: pwd });
-      setTeacherForm({ email: "", password: "", timeMode: false });
+      setTeacherForm({ email: "", password: "", timeMode: false, canImport: false });
       await loadTeacherAccounts();
     }
     setTeacherSaving(false);
@@ -836,8 +916,31 @@ function AttendanceApp({ userEmail, onLogout, isGuest, isAdmin, client, signupCl
 
   const toggleAccountTimeMode = async (id, next) => {
     setTeacherSaving(true);
-    const { error } = await client.from("profiles").update({ time_mode: next }).eq("id", id);
-    if (!error) await loadTeacherAccounts();
+    setTeacherPanelError("");
+    const { data, error } = await client.from("profiles").update({ time_mode: next }).eq("id", id).select();
+    if (error) {
+      setTeacherPanelError(`Time Mode update fail: ${error.message}${error.code ? " (code: " + error.code + ")" : ""}`);
+    } else if (!data || data.length === 0) {
+      // Update ran with no error but changed 0 rows — almost always means the
+      // admin's UPDATE policy on `profiles` is silently blocking this row.
+      setTeacherPanelError("Time Mode update did not save (0 rows updated) — check the 'profiles' table's UPDATE RLS policy.");
+    } else {
+      await loadTeacherAccounts();
+    }
+    setTeacherSaving(false);
+  };
+
+  const toggleAccountCanImport = async (id, next) => {
+    setTeacherSaving(true);
+    setTeacherPanelError("");
+    const { data, error } = await client.from("profiles").update({ can_import: next }).eq("id", id).select();
+    if (error) {
+      setTeacherPanelError(`Supabase Import toggle fail: ${error.message}${error.code ? " (code: " + error.code + ")" : ""}`);
+    } else if (!data || data.length === 0) {
+      setTeacherPanelError("Supabase Import toggle did not save (0 rows updated) — check the 'profiles' table's UPDATE RLS policy.");
+    } else {
+      await loadTeacherAccounts();
+    }
     setTeacherSaving(false);
   };
 
@@ -854,6 +957,43 @@ function AttendanceApp({ userEmail, onLogout, isGuest, isAdmin, client, signupCl
     if (isAdmin && showTeacherPanel) loadTeacherAccounts();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isAdmin, showTeacherPanel]);
+
+  /* ---------- Export ON/OFF switch (admin-only) ----------
+     Reads/writes a single row in `app_settings.export_enabled`. The real
+     protection lives in Postgres RLS on `imported_candidates` (its SELECT
+     policy checks this same flag) — so turning this OFF blocks anyone
+     using the public URL + anon key from reading that table, even outside
+     this app. This button just flips the switch; it does not itself
+     "protect" anything by hiding UI. Run the SQL setup once in Supabase
+     (see chat) before this will have any real effect. */
+  const loadExportSetting = async () => {
+    if (!client) return;
+    const { data, error } = await client.from("app_settings").select("export_enabled").eq("id", true).maybeSingle();
+    if (!error && data) setExportEnabled(!!data.export_enabled);
+  };
+
+  const toggleExportEnabled = async () => {
+    if (!client) return;
+    setExportLoading(true);
+    setExportError("");
+    const next = !exportEnabled;
+    const { data, error } = await client.from("app_settings").update({ export_enabled: next }).eq("id", true).select();
+    if (error) {
+      setExportError(`Export toggle fail: ${error.message}${error.code ? " (code: " + error.code + ")" : ""}`);
+    } else if (!data || data.length === 0) {
+      // 0 rows updated with no error almost always means the admin UPDATE
+      // policy on app_settings is silently blocking this — check is_admin().
+      setExportError("Export toggle did not save (0 rows updated) — check the 'app_settings' table's UPDATE RLS policy.");
+    } else {
+      setExportEnabled(next);
+    }
+    setExportLoading(false);
+  };
+
+  useEffect(() => {
+    if (isAdmin) loadExportSetting();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isAdmin]);
 
   const nextAutoRoll = (list) => {
     const nums = list.map((s) => parseInt(s.roll, 10)).filter((n) => !isNaN(n));
@@ -897,10 +1037,149 @@ function AttendanceApp({ userEmail, onLogout, isGuest, isAdmin, client, signupCl
     setBulkText("");
   };
 
+  // ---- Import candidates from another app (e.g. the Fee Register), so
+  // names don't need to be typed again by hand. That other app writes rows
+  // into a table (importTableName, default "students") in THIS SAME
+  // Supabase project — so it's read here with the same `client`, no
+  // separate URL/key needed. Each imported row is expected to at least
+  // have a `name` column; `roll_no`, `class_name`, `section`, `father_name`
+  // are used too when present, but aren't required. ----
+  const loadImportCandidates = async () => {
+    const table = importTableName.trim();
+    if (!table) { setImportError("Please enter a table name."); return; }
+    setImportLoading(true);
+    setImportError("");
+    try {
+      const { data, error } = await client.from(table).select("*").order("name", { ascending: true });
+      if (error) throw error;
+      setImportCandidates(data || []);
+      setImportClassFilter("all");
+      setImportSectionFilter("all");
+      setImportAddressFilter("all");
+      if (!data || !data.length) setImportError("No data found in this table yet.");
+    } catch (e) {
+      setImportCandidates([]);
+      setImportError(`Could not load data — check the table name, or make sure data was sent from the other app first. (${e.message || e})`);
+    }
+    setImportLoading(false);
+  };
+  useEffect(() => {
+    if (canImport && showImportPanel && importTableNameLoaded) loadImportCandidates();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [canImport, showImportPanel, importTableNameLoaded]);
+
+  // Candidates already enrolled in the CURRENTLY OPEN entity get hidden from
+  // the pick-list (matched by sourceId, which is stamped onto the enrolled
+  // record when it's imported) — same imported candidate can still be
+  // brought into a different entity separately, that's a legitimate case.
+  const importedSourceIdsInClass = new Set(students.filter((s) => s.sourceId).map((s) => s.sourceId));
+  // Unique dropdown option lists, built from whatever data actually loaded —
+  // so the admin only ever sees classes/sections/addresses that really exist
+  // in the imported table, and never has to type them out by hand.
+  const importClassOptions = Array.from(new Set(importCandidates.map((c) => (c.class_name || "").trim()).filter(Boolean))).sort((a, b) => a.localeCompare(b, undefined, { numeric: true }));
+  const importSectionOptions = Array.from(new Set(importCandidates.map((c) => (c.section || "").trim()).filter(Boolean))).sort((a, b) => a.localeCompare(b, undefined, { numeric: true }));
+  const importAddressOptions = Array.from(new Set(importCandidates.map((c) => (c.address || "").trim()).filter(Boolean))).sort((a, b) => a.localeCompare(b));
+  const importListShown = importCandidates
+    .filter((c) => !importedSourceIdsInClass.has(c.source_id || c.id))
+    .filter((c) => importClassFilter === "all" || (c.class_name || "").trim() === importClassFilter)
+    .filter((c) => importSectionFilter === "all" || (c.section || "").trim() === importSectionFilter)
+    .filter((c) => importAddressFilter === "all" || (c.address || "").trim() === importAddressFilter)
+    .filter((c) => {
+      if (!importSearch.trim()) return true;
+      const q = importSearch.trim().toLowerCase();
+      return [c.name, c.father_name, c.class_name, c.section, c.roll_no, c.mobile]
+        .some((v) => v != null && String(v).toLowerCase().includes(q));
+    });
+
+  // When enrolling from import, the candidate's class and enrollment number
+  // are appended to their name (e.g. "Laxmi kumari Play 001") — this makes
+  // it easy to tell apart same-name candidates from different classes,
+  // regardless of what roll number the app itself assigns.
+  const buildImportedName = (c) => {
+    const base = (c.name || "").trim();
+    const parts = [(c.class_name || "").trim(), (c.roll_no || "").toString().trim()].filter(Boolean);
+    return parts.length ? `${base} ${parts.join(" ")}`.trim() : base;
+  };
+
+  // Human-readable labels for whatever columns the imported table happens to
+  // have. Anything not listed here still shows up (title-cased from its
+  // column name) so no field silently gets hidden — the whole point of the
+  // expand-on-tap view is "show everything", not a hand-picked subset.
+  const importFieldLabels = {
+    name: "Name", roll_no: "Roll No.", class_name: "Class", section: "Section",
+    father_name: "Father's Name", mother_name: "Mother's Name", mobile: "Mobile No.",
+    phone: "Phone No.", address: "Address", dob: "Date of Birth", gender: "Gender",
+    aadhar: "Aadhar No.", email: "Email",
+    custodian: "Custodian", custodian_name: "Custodian", guardian: "Guardian",
+    guardian_name: "Guardian",
+  };
+  const importFieldHiddenKeys = new Set(["id", "source_id", "created_at", "updated_at", "user_id"]);
+  const getImportDetailFields = (c) =>
+    Object.keys(c)
+      .filter((k) => !importFieldHiddenKeys.has(k) && c[k] != null && String(c[k]).trim() !== "")
+      .map((k) => ({
+        key: k,
+        label: importFieldLabels[k] || k.replace(/_/g, " ").replace(/\b\w/g, (ch) => ch.toUpperCase()),
+        value: String(c[k]),
+      }));
+  // Snapshot of the imported row's extra fields (father's name, mobile, custodian,
+  // whatever else that table has), stamped onto the enrolled student record itself —
+  // so the details survive even if the source row later changes or is deleted, and
+  // are visible to admin AND custodian alike in the enrolled list below, not just
+  // during the import step.
+  const buildImportDataSnapshot = (c) => {
+    const snap = {};
+    Object.keys(c).forEach((k) => {
+      if (importFieldHiddenKeys.has(k)) return;
+      if (c[k] == null || String(c[k]).trim() === "") return;
+      snap[k] = c[k];
+    });
+    return snap;
+  };
+
+  const enrollOneFromImport = (c) => {
+    const sourceId = c.source_id || c.id;
+    setStudents((prev) => {
+      if (prev.some((s) => s.sourceId === sourceId)) return prev;
+      // Register's own roll number is always the next sequential number —
+      // the imported enrollment number is not used here since it's already
+      // appended to the name (buildImportedName).
+      const roll = nextAutoRoll(prev);
+      return [...prev, { id: newId("s"), roll, name: buildImportedName(c), active: true, enrolledAt: todayISO(), sourceId, importData: buildImportDataSnapshot(c) }]
+        .sort((a, b) => a.roll.localeCompare(b.roll, undefined, { numeric: true }));
+    });
+    setImportSelectedIds((prev) => { const next = new Set(prev); next.delete(sourceId); return next; });
+  };
+  const toggleImportSelected = (id) => {
+    setImportSelectedIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id); else next.add(id);
+      return next;
+    });
+  };
+  const enrollSelectedFromImport = () => {
+    const toAdd = importListShown.filter((c) => importSelectedIds.has(c.source_id || c.id));
+    if (!toAdd.length) return;
+    const today = todayISO();
+    setStudents((prev) => {
+      let list = [...prev];
+      let counter = parseInt(nextAutoRoll(list), 10);
+      toAdd.forEach((c) => {
+        const sourceId = c.source_id || c.id;
+        if (list.some((s) => s.sourceId === sourceId)) return;
+        const roll = String(counter);
+        counter += 1;
+        list.push({ id: newId("s"), roll, name: buildImportedName(c), active: true, enrolledAt: today, sourceId, importData: buildImportDataSnapshot(c) });
+      });
+      return list.sort((a, b) => a.roll.localeCompare(b.roll, undefined, { numeric: true }));
+    });
+    setImportSelectedIds(new Set());
+  };
+
   const removeStudent = (id, name) => {
     if (!isAdmin) return;
     const storedPin = localStorage.getItem(DELETE_PIN_KEY) || DEFAULT_DELETE_PIN;
-    const entered = window.prompt(`"${name || "Candidate"}" ko delete karne ke liye Admin PIN daalo:`);
+    const entered = window.prompt(`Enter Admin PIN to delete "${name || "Candidate"}":`);
     if (entered === null) return; // cancelled
     if (entered.trim() !== storedPin) {
       window.alert("Wrong PIN. Candidate was not deleted.");
@@ -1251,7 +1530,17 @@ function AttendanceApp({ userEmail, onLogout, isGuest, isAdmin, client, signupCl
             ))}
           </select>
           <button style={styles.linkBtnDark} onClick={changeDeletePin}>Change Delete PIN</button>
+          <button
+            style={{ ...styles.linkBtnDark, background: exportEnabled ? "#2f7d3c" : "#8a2f2f", color: "#fff" }}
+            onClick={toggleExportEnabled}
+            disabled={exportLoading}
+          >
+            {exportLoading ? "Please wait…" : exportEnabled ? "Data Export: ON (click to turn OFF)" : "Data Export: OFF (click to turn ON)"}
+          </button>
         </div>
+      )}
+      {isAdmin && exportError && (
+        <div style={{ ...authStyles.error, margin: "0 0 10px" }} className="no-print">{exportError}</div>
       )}
 
       {isAdmin && viewingTeacherEmail && (
@@ -1282,6 +1571,10 @@ function AttendanceApp({ userEmail, onLogout, isGuest, isAdmin, client, signupCl
             <input type="checkbox" checked={teacherForm.timeMode} onChange={(e) => setTeacherForm((p) => ({ ...p, timeMode: e.target.checked }))} />
             This login will use the <b>Time Mode</b> register (OFF = Normal register)
           </label>
+          <label style={styles.timeModeCheckboxRow}>
+            <input type="checkbox" checked={teacherForm.canImport} onChange={(e) => setTeacherForm((p) => ({ ...p, canImport: e.target.checked }))} />
+            Allow <b>Supabase data import</b> access (Import from Another App / Fee Register)
+          </label>
           {teacherPanelError && <div style={authStyles.error}>{teacherPanelError}</div>}
           <button style={styles.teacherPanelBtn} onClick={createTeacherAccount} disabled={teacherSaving}>
             {teacherSaving ? "Please wait…" : "Create Login"}
@@ -1303,6 +1596,15 @@ function AttendanceApp({ userEmail, onLogout, isGuest, isAdmin, client, signupCl
                         onChange={(e) => toggleAccountTimeMode(t.id, e.target.checked)}
                       />
                       {t.time_mode ? "Time Mode (ON)" : "Normal register"}
+                    </label>
+                    <label style={styles.timeModeMiniToggle}>
+                      <input
+                        type="checkbox"
+                        checked={!!t.can_import}
+                        disabled={teacherSaving}
+                        onChange={(e) => toggleAccountCanImport(t.id, e.target.checked)}
+                      />
+                      {t.can_import ? "Supabase Import (Allowed)" : "Supabase Import (Blocked)"}
                     </label>
                   </div>
                   <button style={styles.teacherRemoveBtn} onClick={() => deleteTeacherAccount(t.id)} disabled={teacherSaving}>
@@ -1438,6 +1740,148 @@ function AttendanceApp({ userEmail, onLogout, isGuest, isAdmin, client, signupCl
                 onChange={(e) => setBulkText(e.target.value)} rows={4} />
               <button style={styles.bulkBtn} onClick={addBulk} disabled={!bulkText.trim()}>Enroll all</button>
 
+              {canImport && (
+                <button
+                  style={{ ...styles.bulkBtn, background: "#F5F3E7", color: "#1F3D2B", border: "1px solid #d8cfae", marginTop: 10, display: "flex", alignItems: "center", gap: 6 }}
+                  onClick={() => setShowImportPanel((v) => !v)}
+                >
+                  <UserPlus size={15} />{showImportPanel ? "Hide Import Panel" : "Import from Another App (Fee Register)"}
+                </button>
+              )}
+
+              {canImport && showImportPanel && (
+                <div style={{ marginTop: 10, background: "#fffdf7", border: "1px solid #e3d9b8", borderRadius: 10, padding: 12 }}>
+                  <div style={{ ...styles.sectionLabel, marginBottom: 6 }}>Data table to import from</div>
+                  <div style={{ display: "flex", gap: 8, marginBottom: 10 }}>
+                    <input
+                      style={{ ...styles.textInput, flex: 1 }}
+                      placeholder="students"
+                      value={importTableName}
+                      onChange={(e) => setImportTableName(e.target.value)}
+                    />
+                    <button style={{ ...styles.bulkBtn, flexShrink: 0 }} onClick={loadImportCandidates} disabled={importLoading}>
+                      {importLoading ? "Loading…" : "Load"}
+                    </button>
+                  </div>
+                  {importError && <div style={{ fontSize: 12.5, color: "#B33A3A", marginBottom: 10 }}>{importError}</div>}
+
+                  {importCandidates.length > 0 && (importClassOptions.length > 0 || importSectionOptions.length > 0 || importAddressOptions.length > 0) && (
+                    <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 10 }}>
+                      {importClassOptions.length > 0 && (
+                        <select
+                          style={{ ...styles.textInput, flex: "1 1 120px", minWidth: 100 }}
+                          value={importClassFilter}
+                          onChange={(e) => setImportClassFilter(e.target.value)}
+                        >
+                          <option value="all">All Classes</option>
+                          {importClassOptions.map((v) => <option key={v} value={v}>{v}</option>)}
+                        </select>
+                      )}
+                      {importSectionOptions.length > 0 && (
+                        <select
+                          style={{ ...styles.textInput, flex: "1 1 120px", minWidth: 100 }}
+                          value={importSectionFilter}
+                          onChange={(e) => setImportSectionFilter(e.target.value)}
+                        >
+                          <option value="all">All Sections</option>
+                          {importSectionOptions.map((v) => <option key={v} value={v}>{v}</option>)}
+                        </select>
+                      )}
+                      {importAddressOptions.length > 0 && (
+                        <select
+                          style={{ ...styles.textInput, flex: "1 1 120px", minWidth: 100 }}
+                          value={importAddressFilter}
+                          onChange={(e) => setImportAddressFilter(e.target.value)}
+                        >
+                          <option value="all">All Addresses</option>
+                          {importAddressOptions.map((v) => <option key={v} value={v}>{v}</option>)}
+                        </select>
+                      )}
+                    </div>
+                  )}
+
+                  {importCandidates.length > 5 && (
+                    <div style={styles.searchRow}>
+                      <SearchIcon size={15} color="#b3a889" style={{ flexShrink: 0 }} />
+                      <input
+                        style={styles.searchInput}
+                        placeholder="Search by name, class, roll…"
+                        value={importSearch}
+                        onChange={(e) => setImportSearch(e.target.value)}
+                      />
+                      {importSearch && (
+                        <button style={styles.searchClearBtn} onClick={() => setImportSearch("")} aria-label="Clear search"><X size={14} /></button>
+                      )}
+                    </div>
+                  )}
+
+                  {!importLoading && importCandidates.length > 0 && importListShown.length === 0 && (
+                    <div style={styles.empty}>{(importSearch || importClassFilter !== "all" || importSectionFilter !== "all" || importAddressFilter !== "all") ? "No results for this filter/search." : "All candidates are already enrolled."}</div>
+                  )}
+
+                  {importListShown.length > 0 && (
+                    <>
+                      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 8 }}>
+                        <span style={{ fontSize: 12, color: "#6B4226" }}>{importListShown.length} available{importSelectedIds.size ? `, ${importSelectedIds.size} selected` : ""}</span>
+                        <button
+                          style={{ ...styles.bulkBtn, padding: "6px 12px", fontSize: 12.5, opacity: importSelectedIds.size ? 1 : 0.5 }}
+                          onClick={enrollSelectedFromImport}
+                          disabled={!importSelectedIds.size}
+                        >
+                          Enroll Selected ({importSelectedIds.size})
+                        </button>
+                      </div>
+                      <div style={styles.ledger}>
+                        {importListShown.map((c, idx) => {
+                          const sourceId = c.source_id || c.id;
+                          const checked = importSelectedIds.has(sourceId);
+                          const subLine = [c.class_name, c.section, c.father_name].filter(Boolean).join(" · ");
+                          const isExpanded = expandedImportId === sourceId;
+                          const detailFields = isExpanded ? getImportDetailFields(c) : [];
+                          return (
+                            <div key={sourceId} style={{ borderBottom: idx === importListShown.length - 1 ? "none" : "1px dashed #d8cfae" }}>
+                              <div style={{ ...styles.ledgerRow, borderBottom: "none" }}>
+                                <input type="checkbox" checked={checked} onChange={() => toggleImportSelected(sourceId)} style={{ flexShrink: 0, width: 16, height: 16 }} />
+                                <div
+                                  style={{ ...styles.studentName, cursor: "pointer" }}
+                                  onClick={() => setExpandedImportId(isExpanded ? null : sourceId)}
+                                  role="button"
+                                  aria-expanded={isExpanded}
+                                  aria-label={`${isExpanded ? "Hide" : "Show"} details for ${c.name || "candidate"}`}
+                                >
+                                  <div style={{ display: "flex", alignItems: "center", gap: 5 }}>
+                                    <span>{c.name || "(no name)"}{c.roll_no ? <span style={{ color: "#8a8368", fontFamily: "'IBM Plex Mono', monospace", fontSize: 11.5 }}> · Roll {c.roll_no}</span> : ""}</span>
+                                    <ChevronDown size={13} color="#b3a889" style={{ flexShrink: 0, transform: isExpanded ? "rotate(180deg)" : "none", transition: "transform 0.15s" }} />
+                                  </div>
+                                  {subLine && <div style={{ fontSize: 11.5, color: "#8a8368", marginTop: 1 }}>{subLine}</div>}
+                                </div>
+                                <button style={{ ...styles.addBtn, width: "auto", padding: "6px 12px", fontSize: 12.5 }} onClick={() => enrollOneFromImport(c)}>
+                                  Enroll
+                                </button>
+                              </div>
+                              {isExpanded && (
+                                <div style={{ margin: "0 0 10px 26px", padding: "8px 10px", background: "#f7f2df", border: "1px solid #e3d9b8", borderRadius: 8 }}>
+                                  {detailFields.length === 0 ? (
+                                    <div style={{ fontSize: 12, color: "#8a8368" }}>No extra details available.</div>
+                                  ) : (
+                                    detailFields.map((f) => (
+                                      <div key={f.key} style={{ display: "flex", justifyContent: "space-between", gap: 10, fontSize: 12.5, padding: "3px 0" }}>
+                                        <span style={{ color: "#8a8368" }}>{f.label}</span>
+                                        <span style={{ color: "#3a3323", fontWeight: 500, textAlign: "right" }}>{f.value}</span>
+                                      </div>
+                                    ))
+                                  )}
+                                </div>
+                              )}
+                            </div>
+                          );
+                        })}
+                      </div>
+                    </>
+                  )}
+                </div>
+              )}
+
               <div style={{ ...styles.sectionLabel, marginTop: 18 }}>
                 Candidates enrolled in {classInfo.className || "this entity"} ({students.filter((s) => s.active !== false).length} active / {students.length} total)
               </div>
@@ -1465,8 +1909,11 @@ function AttendanceApp({ userEmail, onLogout, isGuest, isAdmin, client, signupCl
                 <div style={styles.ledger}>
                   {enrollListShown.map((s, idx) => {
                     const isActive = s.active !== false;
+                    const hasDetails = s.importData && Object.keys(s.importData).length > 0;
+                    const isExpanded = expandedEnrolledId === s.id;
                     return (
-                    <div key={s.id} style={{ ...styles.ledgerRow, alignItems: "flex-start", borderBottom: idx === enrollListShown.length - 1 ? "none" : "1px dashed #d8cfae", opacity: isActive ? 1 : 0.55 }}>
+                    <div key={s.id} style={{ borderBottom: idx === enrollListShown.length - 1 ? "none" : "1px dashed #d8cfae" }}>
+                    <div style={{ ...styles.ledgerRow, alignItems: "flex-start", borderBottom: "none", opacity: isActive ? 1 : 0.55 }}>
                       {editingId === s.id ? (
                         <>
                           <input style={{ ...styles.textInput, width: 50, padding: "5px 6px" }} value={editRoll} onChange={(e) => setEditRoll(e.target.value)} />
@@ -1488,9 +1935,18 @@ function AttendanceApp({ userEmail, onLogout, isGuest, isAdmin, client, signupCl
                       ) : (
                         <>
                           <div style={styles.rollBadge}>{s.roll}</div>
-                          <div style={styles.studentName}>
-                            <div style={{ ...styles.studentNameLine, ...styles.studentNameLineWrap }}>
-                              {s.name}
+                          <div
+                            style={{ ...styles.studentName, cursor: hasDetails ? "pointer" : "default" }}
+                            onClick={() => hasDetails && setExpandedEnrolledId(isExpanded ? null : s.id)}
+                            role={hasDetails ? "button" : undefined}
+                            aria-expanded={hasDetails ? isExpanded : undefined}
+                            aria-label={hasDetails ? `${isExpanded ? "Hide" : "Show"} details for ${s.name}` : undefined}
+                          >
+                            <div style={{ ...styles.studentNameLine, ...styles.studentNameLineWrap, display: "flex", alignItems: "center", gap: 5 }}>
+                              <span>{s.name}</span>
+                              {hasDetails && (
+                                <ChevronDown size={13} color="#b3a889" style={{ flexShrink: 0, transform: isExpanded ? "rotate(180deg)" : "none", transition: "transform 0.15s" }} />
+                              )}
                               {!isActive && <span style={styles.inactiveTag}>Inactive</span>}
                             </div>
                             {s.enrolledAt && (
@@ -1533,6 +1989,17 @@ function AttendanceApp({ userEmail, onLogout, isGuest, isAdmin, client, signupCl
                         </>
                       )}
                     </div>
+                    {hasDetails && isExpanded && (
+                      <div style={{ margin: "0 0 10px 44px", padding: "8px 10px", background: "#f7f2df", border: "1px solid #e3d9b8", borderRadius: 8 }}>
+                        {getImportDetailFields(s.importData).map((f) => (
+                          <div key={f.key} style={{ display: "flex", justifyContent: "space-between", gap: 10, fontSize: 12.5, padding: "3px 0" }}>
+                            <span style={{ color: "#8a8368" }}>{f.label}</span>
+                            <span style={{ color: "#3a3323", fontWeight: 500, textAlign: "right" }}>{f.value}</span>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                    </div>
                     );
                   })}
                 </div>
@@ -1566,6 +2033,12 @@ function AttendanceApp({ userEmail, onLogout, isGuest, isAdmin, client, signupCl
                 )}
                 {teacherMode && (
                   <>
+                    {isAdmin && (
+                      <div style={styles.lateTimeRow}>
+                        <span style={styles.lateTimeLabel}>📱 Allow candidates to self check-in (name + PIN)</span>
+                        <input type="checkbox" checked={!!checkinCode} onChange={(e) => setCheckinOn(e.target.checked)} />
+                      </div>
+                    )}
                     {isAdmin && (
                       <div style={styles.lateTimeRow}>
                         <span style={styles.lateTimeLabel}>📸 Selfie required when marking Present</span>
@@ -1665,7 +2138,7 @@ function AttendanceApp({ userEmail, onLogout, isGuest, isAdmin, client, signupCl
                 </div>
               )}
 
-              {!holidays[selectedDate] && activeStudents.length > 0 && (
+              {!holidays[selectedDate] && !teacherMode && activeStudents.length > 0 && (
                 <div style={styles.bulkMarkRow}>
                   {(() => {
                     const day = attendance[selectedDate] || {};
@@ -1770,16 +2243,14 @@ function AttendanceApp({ userEmail, onLogout, isGuest, isAdmin, client, signupCl
                                       return;
                                     }
                                   }
-                                  // Already Present in Time Mode: leaving Present (toggling P off, or marking A) always needs PIN — admin aur custodian dono ke liye, jab tak PIN sahi na ho tab tak Present nahi hatega/Absent nahi lagega.
-                                  if (teacherMode && st === "P") {
-                                    setPinTarget({ student: s, turningOn: false, nextCode: code });
+                                  // Time Mode ON: both P and A always require PIN — for admin and custodian alike,
+                                  // whether the student is already marked or not. Status won't change without the correct PIN.
+                                  if (teacherMode) {
+                                    const turningOn = code === "P" && st !== "P";
+                                    setPinTarget({ student: s, turningOn, nextCode: code });
                                     return;
                                   }
-                                  if (code === "P" && teacherMode && isGuest && s.pin) {
-                                    setPinTarget({ student: s, turningOn: true, nextCode: "P" });
-                                    return;
-                                  }
-                                  if (code === "P" && teacherMode && st !== "P") {
+                                  if (code === "P" && st !== "P") {
                                     if (selfieOn) {
                                       setSelfieTarget(s);
                                     } else {
@@ -2491,10 +2962,10 @@ const styles = {
    SUPABASE AUTH + CLOUD STORAGE
    ============================================================ */
 
-// Ye do values bhar di jaayein to app seedha isi Supabase project se
-// connect ho jaayegi — seedha Login/Sign-up screen aayega. Anon key
-// public/client-safe hai; data ki security Row Level Security policy
-// se hoti hai (supabase_setup.sql project ke SQL Editor me chalao).
+// Fill in these two values and the app connects straight to this Supabase
+// project — the Login/Sign-up screen appears directly. The anon key is
+// public/client-safe; data security comes from Row Level Security policies
+// (run supabase_setup.sql in the project's SQL Editor).
 const EMBEDDED_SUPABASE_URL = "https://lccfkksasrhvvtgknqhs.supabase.co";
 const EMBEDDED_SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImxjY2Zra3Nhc3JodnZ0Z2tucWhzIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODY0MzkzODksImV4cCI6MjEwMjAxNTM4OX0.K6aUFls10jlfIuvPU1Br__gKXdOzOKfklWMT6zZTNVM";
 
@@ -2567,7 +3038,7 @@ function AuthScreen({ client, onAuthed, blockedError, onCandidateLoggedIn }) {
       return;
     }
     if (password.length < 6) {
-      setErr("Password kam se kam 6 characters ka ho.");
+      setErr("Password must be at least 6 characters.");
       return;
     }
     setLoading(true);
@@ -2654,9 +3125,12 @@ function AuthScreen({ client, onAuthed, blockedError, onCandidateLoggedIn }) {
 function CandidateSelfScreen({ client, candidate, onLogout }) {
   // geochecking | ready | selfie | submitting | success | already | error
   const alreadyMarked = candidate.classInfo && candidate.classInfo.alreadyPresent;
+  const markedAbsent = candidate.classInfo && !alreadyMarked && candidate.classInfo.attendanceStatus === "A";
   const [stage, setStage] = useState(alreadyMarked ? "already" : "ready");
   const [message, setMessage] = useState(
-    alreadyMarked ? `You're already marked Present today${candidate.classInfo.presentTime ? ` (${candidate.classInfo.presentTime})` : ""}.` : ""
+    alreadyMarked
+      ? `You're already marked Present today${candidate.classInfo.presentTime ? ` (${candidate.classInfo.presentTime})` : ""}.`
+      : (markedAbsent ? "You've been marked Absent today. Contact your Admin/Custodian to change this." : "")
   );
   const [coords, setCoords] = useState(null);
 
@@ -2732,7 +3206,11 @@ function CandidateSelfScreen({ client, candidate, onLogout }) {
         {stage === "ready" && (
           <>
             {message && <div style={authStyles.error}>{message}</div>}
-            <button style={authStyles.primaryBtn} onClick={startCheckin}>Mark Present</button>
+            {markedAbsent ? (
+              <div style={authStyles.info}>🔒 Contact your Admin/Custodian to mark you Present.</div>
+            ) : (
+              <button style={authStyles.primaryBtn} onClick={startCheckin}>Mark Present</button>
+            )}
           </>
         )}
 
@@ -2894,7 +3372,7 @@ function Root() {
 
   // Agar admin kisi teacher ka access hata de (profiles row delete kar de),
   // to jo teacher pehle se logged in hai uska session bhi jald khatam ho —
-  // isliye har thodi der me aur tab wapas dekhne par profile dobara verify karo.
+  // so we re-verify the profile from time to time and when tab regains focus.
   useEffect(() => {
     if (!client || !session || !profile) return;
     const revalidate = async () => {
@@ -2918,9 +3396,9 @@ function Root() {
     };
   }, [client, session, profile]);
 
-  // Admin ke liye teacher accounts ki list — "kis teacher ka data dekhna/edit
-  // karna hai" dropdown ke liye. Actual access RLS se milta hai (is_admin()),
-  // ye list sirf UI me dikhane ke liye hai.
+  // List of teacher accounts for Admin — used for the "which teacher's data
+  // to view/edit" dropdown. Actual access is governed by RLS (is_admin()),
+  // this list is just for display in the UI.
   useEffect(() => {
     if (!client || !profile || profile.role !== "admin") {
       setTeacherOptions([]);
@@ -2981,6 +3459,10 @@ function Root() {
     ? `Entities Custodian: ${session.user.email}`
     : session.user.email;
   const lockedTimeMode = viewingTeacher ? !!viewingTeacher.time_mode : (isTeacher ? !!profile.time_mode : null);
+  // Admin always has full Supabase import access. A custodian (teacher) only
+  // gets it if the admin has explicitly switched it on for their login —
+  // when the admin is "viewing as" a custodian, admin's own access still wins.
+  const canImport = isAdmin || (isTeacher && !!profile.can_import);
 
   return (
     <AttendanceApp
@@ -2988,6 +3470,7 @@ function Root() {
       userEmail={userLabel}
       isGuest={isTeacher}
       isAdmin={isAdmin}
+      canImport={canImport}
       client={client}
       signupClient={signupClient}
       onLogout={handleLogout}
