@@ -1558,6 +1558,7 @@ function AttendanceApp({ userEmail, onLogout, isGuest, isAdmin, canImport, clien
   const statsForDates = (studentId, dates) => {
     let present = 0, absent = 0, leave = 0;
     dates.forEach((d) => {
+      if (holidays[d]) return; // holiday din ki entry, chahe pehle mark ho chuki ho, count na ho
       const st = attendance[d] && attendance[d][studentId];
       if (st === "P") present++;
       else if (st === "A") absent++;
@@ -1568,14 +1569,14 @@ function AttendanceApp({ userEmail, onLogout, isGuest, isAdmin, canImport, clien
     return { present, absent, leave, total, percent };
   };
   const datesWithData = (prefix) =>
-    Object.keys(attendance).filter((d) => d.startsWith(prefix) && Object.keys(attendance[d] || {}).length > 0);
+    Object.keys(attendance).filter((d) => d.startsWith(prefix) && !holidays[d] && Object.keys(attendance[d] || {}).length > 0);
 
   // Academic year = April(selectedYear) se March(selectedYear+1) tak.
   const datesInAcademicYear = (startYearStr) => {
     const y = parseInt(startYearStr, 10);
     const startDate = `${y}-04-01`;
     const endDate = `${y + 1}-03-31`;
-    return Object.keys(attendance).filter((d) => d >= startDate && d <= endDate && Object.keys(attendance[d] || {}).length > 0);
+    return Object.keys(attendance).filter((d) => d >= startDate && d <= endDate && !holidays[d] && Object.keys(attendance[d] || {}).length > 0);
   };
   const academicYearLabel = (startYearStr) => {
     const y = parseInt(startYearStr, 10);
@@ -1631,7 +1632,7 @@ function AttendanceApp({ userEmail, onLogout, isGuest, isAdmin, canImport, clien
       let lateCount = 0;
       for (let d = 1; d <= daysInSelectedMonth; d++) {
         const dateStr = `${selectedMonth}-${String(d).padStart(2, "0")}`;
-        const st = attendance[dateStr] && attendance[dateStr][s.id];
+        const st = holidays[dateStr] ? null : (attendance[dateStr] && attendance[dateStr][s.id]);
         if (st === "P") {
           totalPresent++;
           const stampedTime = attendanceTimes[dateStr] && attendanceTimes[dateStr][s.id];
@@ -3321,7 +3322,7 @@ function AuthScreen({ client, onAuthed, blockedError, onCandidateLoggedIn }) {
       if (error) {
         setCErr("Something went wrong — try again.");
       } else if (!data || data.found === false) {
-        setCErr("Name or PIN did not match.");
+        setCErr((data && data.message) || "Name or PIN did not match.");
       } else {
         onCandidateLoggedIn({ name: cName.trim(), pin: cPin, classInfo: data });
       }
