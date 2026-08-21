@@ -803,6 +803,73 @@ function AttendanceApp({ userEmail, onLogout, isGuest, isAdmin, canImport, clien
     })();
   }, [classes, activeClassId, loaded]);
 
+  // ---- Periodic cloud refresh for TODAY's attendance ----
+  // A candidate self-check-in (via the self_checkin_by_pin RPC — triggered
+  // either from this app's own "Candidate" login mode, or from the Fee
+  // Register app's embedded "Candidate Attendance Register") writes directly
+  // into the shared app_storage row on the server, completely bypassing this
+  // browser's own React state. Without this effect, a self-check-in would
+  // only ever show up here after a full page reload — and worse, the very
+  // next local edit in this tab would silently overwrite the RPC-written
+  // mark on the server with this browser's stale copy (the save effect right
+  // above always writes the ENTIRE classes array back). This pulls just
+  // TODAY's attendance / attendanceTimes / attendanceSelfies bucket from the
+  // server and merges it (server wins for today) into every local class, on
+  // a short interval, so self-check-ins show up live in the Register tab
+  // without touching anything else in state (roll numbers, PINs, other
+  // dates, etc.).
+  useEffect(() => {
+    if (!loaded) return;
+    const today = todayISO();
+    const pullTodayFromCloud = async () => {
+      if (document.visibilityState !== "visible") return;
+      try {
+        const res = await window.storage.get(STORAGE_KEY, false);
+        if (!res || !res.value) return;
+        const serverData = JSON.parse(res.value);
+        if (!serverData.classes || !serverData.classes.length) return;
+        setClasses((prev) => prev.map((c) => {
+          const sc = serverData.classes.find((x) => x.id === c.id);
+          if (!sc) return c;
+          let changed = false;
+          const merged = { ...c };
+          if (sc.attendance && sc.attendance[today]) {
+            const localDay = (c.attendance && c.attendance[today]) || {};
+            const mergedDay = { ...localDay, ...sc.attendance[today] };
+            if (JSON.stringify(mergedDay) !== JSON.stringify(localDay)) {
+              merged.attendance = { ...c.attendance, [today]: mergedDay };
+              changed = true;
+            }
+          }
+          if (sc.attendanceTimes && sc.attendanceTimes[today]) {
+            const localDay = (c.attendanceTimes && c.attendanceTimes[today]) || {};
+            const mergedDay = { ...localDay, ...sc.attendanceTimes[today] };
+            if (JSON.stringify(mergedDay) !== JSON.stringify(localDay)) {
+              merged.attendanceTimes = { ...c.attendanceTimes, [today]: mergedDay };
+              changed = true;
+            }
+          }
+          if (sc.attendanceSelfies && sc.attendanceSelfies[today]) {
+            const localDay = (c.attendanceSelfies && c.attendanceSelfies[today]) || {};
+            const mergedDay = { ...localDay, ...sc.attendanceSelfies[today] };
+            if (JSON.stringify(mergedDay) !== JSON.stringify(localDay)) {
+              merged.attendanceSelfies = { ...c.attendanceSelfies, [today]: mergedDay };
+              changed = true;
+            }
+          }
+          return changed ? merged : c;
+        }));
+      } catch (e) { /* ignore — will retry on next tick */ }
+    };
+    pullTodayFromCloud();
+    const interval = setInterval(pullTodayFromCloud, 12000);
+    document.addEventListener("visibilitychange", pullTodayFromCloud);
+    return () => {
+      clearInterval(interval);
+      document.removeEventListener("visibilitychange", pullTodayFromCloud);
+    };
+  }, [loaded]);
+
   // ---- Import-source table name (the Supabase table another app, like the
   // fee register, writes candidate data into) — remembered per-user via the
   // same app_storage key/value store everything else here uses, so it
