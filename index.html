@@ -191,7 +191,7 @@ const MapPin = makeIcon(<>
 
 /* ---------------- app logic (ported from the original .jsx) ---------------- */
 
-const FONT_IMPORT = `@import url('https://fonts.googleapis.com/css2?family=Kalam:wght@400;700&family=Inter:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap');`;
+const FONT_IMPORT = `@import url('https://fonts.googleapis.com/css2?family=Kalam:wght@400;700&family=Inter:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&family=Noto+Sans+Devanagari:wght@400;500;600;700&display=swap');`;
 
 const STORAGE_KEY = "attendance-app-store-v2";
 
@@ -212,6 +212,87 @@ const newId = (p) => `${p}_${Date.now()}_${Math.random().toString(36).slice(2, 7
 // "08:19 pm" -> "8:19p" — compact form so it fits inside a narrow grid cell without overlapping neighbours
 const shortTime = (t) => (t ? t.replace(/^0/, "").replace(/\s?(am|pm|AM|PM)$/, (m) => m.trim()[0].toLowerCase()) : t);
 const fullTimeNoAmPm = (t) => (t ? t.replace(/\s?(am|pm|AM|PM)$/, "").trim() : t);
+
+/* ---------------- English -> Hindi name conversion ----------------
+   Primary: Google's public translate endpoint (used client-side, no key
+   needed) — gives accurate, natural Devanagari spelling for names.
+   Fallback: a local rule-based phonetic transliterator, used only when
+   the network call fails (offline / blocked), so the app never breaks
+   and every enrolled candidate still gets a Hindi name. Results are
+   cached in-memory so the same name is never looked up twice. */
+const hindiNameCache = new Map();
+
+const LOCAL_HI_MAP = [
+  ["shr", "श्र"], ["sh", "श"], ["chh", "छ"], ["ch", "च"], ["kh", "ख"], ["gh", "घ"],
+  ["ph", "फ"], ["bh", "भ"], ["th", "थ"], ["dh", "ध"], ["jh", "झ"], ["ny", "ञ"],
+  ["ng", "ङ"], ["ksh", "क्ष"], ["gy", "ज्ञ"], ["tr", "त्र"],
+  ["aa", "ा"], ["ee", "ी"], ["oo", "ू"], ["ou", "ौ"], ["ai", "ै"], ["au", "ौ"],
+  ["a", "अ"], ["b", "ब"], ["c", "क"], ["d", "द"], ["e", "ए"], ["f", "फ़"],
+  ["g", "ग"], ["h", "ह"], ["i", "इ"], ["j", "ज"], ["k", "क"], ["l", "ल"],
+  ["m", "म"], ["n", "न"], ["o", "ओ"], ["p", "प"], ["q", "क़"], ["r", "र"],
+  ["s", "स"], ["t", "त"], ["u", "उ"], ["v", "व"], ["w", "व"], ["x", "क्स"],
+  ["y", "य"], ["z", "ज़"],
+];
+const LOCAL_HI_MATRA = { a: "ा", i: "ि", ee: "ी", u: "ु", oo: "ू", e: "े", ai: "ै", o: "ो", ou: "ौ" };
+function localTransliterateWord(word) {
+  const w = word.toLowerCase();
+  let out = "", i = 0;
+  const consonants = "bcdfghjklmnpqrstvwxyz";
+  while (i < w.length) {
+    let matched = null, matchLen = 0;
+    for (const [rom, hi] of LOCAL_HI_MAP) {
+      if (w.startsWith(rom, i) && rom.length > matchLen && consonants.includes(rom[0])) {
+        matched = hi; matchLen = rom.length;
+      }
+    }
+    if (matched) {
+      out += matched; i += matchLen;
+      const vowels = ["aa", "ee", "oo", "ai", "ou", "au", "a", "i", "u", "e", "o"];
+      const v = vowels.find((vw) => w.startsWith(vw, i));
+      if (v) {
+        const key = v === "au" ? "ou" : v;
+        if (LOCAL_HI_MATRA[key]) out += LOCAL_HI_MATRA[key];
+        i += v.length;
+      } else {
+        out += "्"; // consonant with no following vowel -> halant
+      }
+      continue;
+    }
+    let vmatched = null, vlen = 0;
+    for (const [rom, hi] of LOCAL_HI_MAP) {
+      if (w.startsWith(rom, i) && rom.length > vlen && !consonants.includes(rom[0])) {
+        vmatched = hi; vlen = rom.length;
+      }
+    }
+    if (vmatched) { out += vmatched; i += vlen; continue; }
+    i += 1; // unknown char — skip
+  }
+  return out.replace(/्$/, "");
+}
+const localTransliterateHindi = (name) =>
+  (name || "").trim().split(/\s+/).map(localTransliterateWord).join(" ");
+
+async function translateToHindi(name) {
+  const clean = (name || "").trim();
+  if (!clean) return "";
+  if (hindiNameCache.has(clean)) return hindiNameCache.get(clean);
+  try {
+    const url = `https://translate.googleapis.com/translate_a/single?client=gtx&sl=en&tl=hi&dt=t&q=${encodeURIComponent(clean)}`;
+    const res = await fetch(url);
+    if (!res.ok) throw new Error("translate http " + res.status);
+    const data = await res.json();
+    const hi = (data && data[0] || []).map((seg) => seg[0]).join("").trim();
+    if (hi) {
+      hindiNameCache.set(clean, hi);
+      return hi;
+    }
+    throw new Error("empty translate result");
+  } catch (e) {
+    const hi = localTransliterateHindi(clean);
+    hindiNameCache.set(clean, hi);
+    return hi;
+  }
+}
 
 const STATUS = {
   P: { label: "Present", short: "P", color: "#4C8C5B" },
@@ -659,6 +740,8 @@ function AttendanceApp({ userEmail, onLogout, isGuest, isAdmin, canImport, clien
   const [editingId, setEditingId] = useState(null);
   const [editRoll, setEditRoll] = useState("");
   const [editName, setEditName] = useState("");
+  const [editNameHi, setEditNameHi] = useState("");
+  const [editNameHiLoading, setEditNameHiLoading] = useState(false);
   const [editPin, setEditPin] = useState("");
   const [saveError, setSaveError] = useState(false);
   const [justStamped, setJustStamped] = useState(null);
@@ -1031,13 +1114,25 @@ function AttendanceApp({ userEmail, onLogout, isGuest, isAdmin, canImport, clien
     return nums.length ? String(Math.max(...nums) + 1) : "1";
   };
 
+  // Fills in a candidate's Hindi name asynchronously (via translateToHindi)
+  // once it's already in the list, and patches it in without disturbing
+  // anything the user may have typed in the meantime.
+  const fillHindiNameFor = (id, name) => {
+    translateToHindi(name).then((nameHi) => {
+      if (!nameHi) return;
+      setStudents((prev) => prev.map((s) => (s.id === id && !s.nameHi ? { ...s, nameHi } : s)));
+    });
+  };
+
   const addStudent = () => {
     const name = newName.trim();
     if (!name) return;
+    const id = newId("s");
     setStudents((prev) => {
       const roll = newRoll.trim() || nextAutoRoll(prev);
-      return [...prev, { id: newId("s"), roll, name, active: true, enrolledAt: todayISO() }].sort((a, b) => a.roll.localeCompare(b.roll, undefined, { numeric: true }));
+      return [...prev, { id, roll, name, nameHi: "", active: true, enrolledAt: todayISO() }].sort((a, b) => a.roll.localeCompare(b.roll, undefined, { numeric: true }));
     });
+    fillHindiNameFor(id, name);
     setNewRoll("");
     setNewName("");
     nameInputRef.current && nameInputRef.current.focus();
@@ -1047,6 +1142,7 @@ function AttendanceApp({ userEmail, onLogout, isGuest, isAdmin, canImport, clien
     const lines = bulkText.split("\n").map((l) => l.trim()).filter(Boolean);
     if (!lines.length) return;
     const today = todayISO();
+    const newlyAdded = [];
     setStudents((prev) => {
       let list = [...prev];
       let counter = parseInt(nextAutoRoll(list), 10);
@@ -1061,10 +1157,13 @@ function AttendanceApp({ userEmail, onLogout, isGuest, isAdmin, canImport, clien
           name = line;
         }
         counter = Math.max(counter, parseInt(roll, 10) || 0) + 1;
-        list.push({ id: newId("s"), roll, name, active: true, enrolledAt: today });
+        const id = newId("s");
+        newlyAdded.push({ id, name });
+        list.push({ id, roll, name, nameHi: "", active: true, enrolledAt: today });
       });
       return list.sort((a, b) => a.roll.localeCompare(b.roll, undefined, { numeric: true }));
     });
+    newlyAdded.forEach(({ id, name }) => fillHindiNameFor(id, name));
     setBulkText("");
   };
 
@@ -1170,15 +1269,18 @@ function AttendanceApp({ userEmail, onLogout, isGuest, isAdmin, canImport, clien
 
   const enrollOneFromImport = (c) => {
     const sourceId = c.source_id || c.id;
+    const id = newId("s");
+    const importedName = buildImportedName(c);
     setStudents((prev) => {
       if (prev.some((s) => s.sourceId === sourceId)) return prev;
       // Register's own roll number is always the next sequential number —
       // the imported enrollment number is not used here since it's already
       // appended to the name (buildImportedName).
       const roll = nextAutoRoll(prev);
-      return [...prev, { id: newId("s"), roll, name: buildImportedName(c), active: true, enrolledAt: todayISO(), sourceId, importData: buildImportDataSnapshot(c) }]
+      return [...prev, { id, roll, name: importedName, nameHi: "", active: true, enrolledAt: todayISO(), sourceId, importData: buildImportDataSnapshot(c) }]
         .sort((a, b) => a.roll.localeCompare(b.roll, undefined, { numeric: true }));
     });
+    fillHindiNameFor(id, importedName);
     setImportSelectedIds((prev) => { const next = new Set(prev); next.delete(sourceId); return next; });
   };
   const toggleImportSelected = (id) => {
@@ -1192,6 +1294,7 @@ function AttendanceApp({ userEmail, onLogout, isGuest, isAdmin, canImport, clien
     const toAdd = importListShown.filter((c) => importSelectedIds.has(c.source_id || c.id));
     if (!toAdd.length) return;
     const today = todayISO();
+    const newlyAdded = [];
     setStudents((prev) => {
       let list = [...prev];
       let counter = parseInt(nextAutoRoll(list), 10);
@@ -1200,10 +1303,14 @@ function AttendanceApp({ userEmail, onLogout, isGuest, isAdmin, canImport, clien
         if (list.some((s) => s.sourceId === sourceId)) return;
         const roll = String(counter);
         counter += 1;
-        list.push({ id: newId("s"), roll, name: buildImportedName(c), active: true, enrolledAt: today, sourceId, importData: buildImportDataSnapshot(c) });
+        const id = newId("s");
+        const importedName = buildImportedName(c);
+        newlyAdded.push({ id, name: importedName });
+        list.push({ id, roll, name: importedName, nameHi: "", active: true, enrolledAt: today, sourceId, importData: buildImportDataSnapshot(c) });
       });
       return list.sort((a, b) => a.roll.localeCompare(b.roll, undefined, { numeric: true }));
     });
+    newlyAdded.forEach(({ id, name }) => fillHindiNameFor(id, name));
     setImportSelectedIds(new Set());
   };
 
@@ -1243,17 +1350,34 @@ function AttendanceApp({ userEmail, onLogout, isGuest, isAdmin, canImport, clien
     setEditingId(s.id);
     setEditRoll(s.roll);
     setEditName(s.name);
+    setEditNameHi(s.nameHi || "");
     setEditPin(s.pin || "");
+  };
+
+  // Re-runs the Hindi translation for whatever English name is currently
+  // typed in the edit row, and drops the result into the Hindi field —
+  // used for the manual "refresh" button and to auto-fill a blank field.
+  const refreshEditNameHi = async () => {
+    const name = editName.trim();
+    if (!name) return;
+    setEditNameHiLoading(true);
+    const hi = await translateToHindi(name);
+    setEditNameHi(hi);
+    setEditNameHiLoading(false);
   };
 
   const saveEdit = (id) => {
     const cleanPin = editPin.replace(/\D/g, "").slice(0, 4);
+    const finalName = editName.trim() || "";
     setStudents((prev) =>
       prev
-        .map((s) => (s.id === id ? { ...s, roll: editRoll.trim() || s.roll, name: editName.trim() || s.name, pin: isAdmin ? cleanPin : s.pin } : s))
+        .map((s) => (s.id === id ? { ...s, roll: editRoll.trim() || s.roll, name: finalName || s.name, nameHi: editNameHi.trim(), pin: isAdmin ? cleanPin : s.pin } : s))
         .sort((a, b) => a.roll.localeCompare(b.roll, undefined, { numeric: true }))
     );
     setEditingId(null);
+    // If the Hindi field was left blank (e.g. name changed but not
+    // re-translated), fill it in the background once saved.
+    if (!editNameHi.trim() && finalName) fillHindiNameFor(id, finalName);
   };
 
   const captureGeoCenter = async () => {
@@ -1947,23 +2071,43 @@ function AttendanceApp({ userEmail, onLogout, isGuest, isAdmin, canImport, clien
                     <div key={s.id} style={{ borderBottom: idx === enrollListShown.length - 1 ? "none" : "1px dashed #d8cfae" }}>
                     <div style={{ ...styles.ledgerRow, alignItems: "flex-start", borderBottom: "none", opacity: isActive ? 1 : 0.55 }}>
                       {editingId === s.id ? (
-                        <>
-                          <input style={{ ...styles.textInput, width: 50, padding: "5px 6px" }} value={editRoll} onChange={(e) => setEditRoll(e.target.value)} />
-                          <input style={{ ...styles.textInput, flex: 1, padding: "5px 6px" }} value={editName} onChange={(e) => setEditName(e.target.value)} onKeyDown={(e) => e.key === "Enter" && saveEdit(s.id)} />
-                          {isAdmin && teacherMode && (
+                        <div style={{ display: "flex", flexDirection: "column", gap: 6, width: "100%" }}>
+                          <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
+                            <input style={{ ...styles.textInput, width: 50, padding: "5px 6px", marginBottom: 0 }} value={editRoll} onChange={(e) => setEditRoll(e.target.value)} />
+                            <input style={{ ...styles.textInput, flex: 1, padding: "5px 6px", marginBottom: 0 }} placeholder="Name (English)" value={editName} onChange={(e) => setEditName(e.target.value)} onKeyDown={(e) => e.key === "Enter" && saveEdit(s.id)} />
+                            {isAdmin && teacherMode && (
+                              <input
+                                type="password"
+                                inputMode="numeric"
+                                maxLength={4}
+                                placeholder="PIN"
+                                style={{ ...styles.textInput, width: 56, padding: "5px 6px", textAlign: "center", letterSpacing: 3, marginBottom: 0 }}
+                                value={editPin}
+                                onChange={(e) => setEditPin(e.target.value.replace(/\D/g, "").slice(0, 4))}
+                                onKeyDown={(e) => e.key === "Enter" && saveEdit(s.id)}
+                              />
+                            )}
+                            <button style={styles.deleteBtn} onClick={() => saveEdit(s.id)} aria-label="Save"><Check size={16} color="#4C8C5B" /></button>
+                          </div>
+                          <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
                             <input
-                              type="password"
-                              inputMode="numeric"
-                              maxLength={4}
-                              placeholder="PIN"
-                              style={{ ...styles.textInput, width: 56, padding: "5px 6px", textAlign: "center", letterSpacing: 3 }}
-                              value={editPin}
-                              onChange={(e) => setEditPin(e.target.value.replace(/\D/g, "").slice(0, 4))}
+                              style={{ ...styles.textInput, flex: 1, padding: "5px 6px", marginBottom: 0, fontFamily: "'Noto Sans Devanagari', 'Inter', sans-serif" }}
+                              placeholder="नाम (हिंदी)"
+                              value={editNameHi}
+                              onChange={(e) => setEditNameHi(e.target.value)}
                               onKeyDown={(e) => e.key === "Enter" && saveEdit(s.id)}
                             />
-                          )}
-                          <button style={styles.deleteBtn} onClick={() => saveEdit(s.id)} aria-label="Save"><Check size={16} color="#4C8C5B" /></button>
-                        </>
+                            <button
+                              style={{ ...styles.deleteBtn, opacity: editNameHiLoading ? 0.5 : 1 }}
+                              onClick={refreshEditNameHi}
+                              disabled={editNameHiLoading}
+                              aria-label="Auto-translate name to Hindi"
+                              title="Auto-translate to Hindi"
+                            >
+                              {editNameHiLoading ? "…" : "अ→A"}
+                            </button>
+                          </div>
+                        </div>
                       ) : (
                         <>
                           <div style={styles.rollBadge}>{s.roll}</div>
@@ -1981,6 +2125,9 @@ function AttendanceApp({ userEmail, onLogout, isGuest, isAdmin, canImport, clien
                               )}
                               {!isActive && <span style={styles.inactiveTag}>Inactive</span>}
                             </div>
+                            {s.nameHi && (
+                              <div style={{ fontSize: 11.5, color: "#8a8368", fontFamily: "'Noto Sans Devanagari', 'Inter', sans-serif" }}>{s.nameHi}</div>
+                            )}
                             {s.enrolledAt && (
                               <div style={styles.enrolledDate}>
                                 Enrolled: {new Date(s.enrolledAt + "T00:00:00").toLocaleDateString("en-IN", { day: "numeric", month: "short", year: "numeric" })}
@@ -2224,6 +2371,7 @@ function AttendanceApp({ userEmail, onLogout, isGuest, isAdmin, canImport, clien
                             {s.starred && <Star size={12} fill="#D14343" color="#D14343" style={{ marginRight: 4, verticalAlign: -1, flexShrink: 0 }} />}
                             {s.name}
                           </div>
+                          {s.nameHi && <div style={{ fontSize: 11.5, color: "#8a8368", fontFamily: "'Noto Sans Devanagari', 'Inter', sans-serif" }}>{s.nameHi}</div>}
                           {teacherMode && st === "P" && attendanceTimes[selectedDate] && attendanceTimes[selectedDate][s.id] && (() => {
                             const stampedTime = attendanceTimes[selectedDate][s.id];
                             const late = isLateStamp(stampedTime, getLateTimeForDate(lateTimeHistory, lateTime, selectedDate));
@@ -2391,7 +2539,10 @@ function AttendanceApp({ userEmail, onLogout, isGuest, isAdmin, canImport, clien
                             {monthlyStats.map((s) => (
                               <tr key={s.id}>
                                 <td style={styles.td}>{s.roll}</td>
-                                <td style={{ ...styles.td, textAlign: "left" }}>{s.name}</td>
+                                <td style={{ ...styles.td, textAlign: "left" }}>
+                                  <div>{s.name}</div>
+                                  {s.nameHi && <div style={{ fontSize: 10.5, color: "#8a8368", fontWeight: 400, fontFamily: "'Noto Sans Devanagari', 'Inter', sans-serif" }}>{s.nameHi}</div>}
+                                </td>
                                 <td style={{ ...styles.td, color: STATUS.P.color, fontWeight: 600 }}>{s.present}</td>
                                 <td style={{ ...styles.td, color: STATUS.A.color, fontWeight: 600 }}>{s.absent}</td>
                                 <td style={{ ...styles.td, color: STATUS.L.color, fontWeight: 600 }}>{s.leave}</td>
@@ -2453,7 +2604,10 @@ function AttendanceApp({ userEmail, onLogout, isGuest, isAdmin, canImport, clien
                             {yearlyStats.map((s) => (
                               <tr key={s.id}>
                                 <td style={styles.td}>{s.roll}</td>
-                                <td style={{ ...styles.td, textAlign: "left" }}>{s.name}</td>
+                                <td style={{ ...styles.td, textAlign: "left" }}>
+                                  <div>{s.name}</div>
+                                  {s.nameHi && <div style={{ fontSize: 10.5, color: "#8a8368", fontWeight: 400, fontFamily: "'Noto Sans Devanagari', 'Inter', sans-serif" }}>{s.nameHi}</div>}
+                                </td>
                                 <td style={{ ...styles.td, color: STATUS.P.color, fontWeight: 600 }}>{s.present}</td>
                                 <td style={{ ...styles.td, color: STATUS.A.color, fontWeight: 600 }}>{s.absent}</td>
                                 <td style={{ ...styles.td, color: STATUS.L.color, fontWeight: 600 }}>{s.leave}</td>
@@ -2503,6 +2657,7 @@ function AttendanceApp({ userEmail, onLogout, isGuest, isAdmin, canImport, clien
                         <div style={styles.studentCardIcon}><User size={20} color="#6B4226" /></div>
                         <div>
                           <div style={styles.studentCardName}>{selectedStudent.name}</div>
+                          {selectedStudent.nameHi && <div style={{ fontSize: 12, color: "#8a8368", fontFamily: "'Noto Sans Devanagari', 'Inter', sans-serif" }}>{selectedStudent.nameHi}</div>}
                           <div style={styles.studentCardMeta}>Roll No. {selectedStudent.roll}</div>
                         </div>
                         <div style={{ marginLeft: "auto", textAlign: "right" }}>
@@ -2594,6 +2749,7 @@ function AttendanceApp({ userEmail, onLogout, isGuest, isAdmin, canImport, clien
                         <div style={styles.studentCardIcon}><User size={20} color="#6B4226" /></div>
                         <div>
                           <div style={styles.studentCardName}>{selectedStudent.name}</div>
+                          {selectedStudent.nameHi && <div style={{ fontSize: 12, color: "#8a8368", fontFamily: "'Noto Sans Devanagari', 'Inter', sans-serif" }}>{selectedStudent.nameHi}</div>}
                           <div style={styles.studentCardMeta}>Roll No. {selectedStudent.roll}</div>
                         </div>
                       </div>
@@ -2719,6 +2875,7 @@ function AttendanceApp({ userEmail, onLogout, isGuest, isAdmin, canImport, clien
                                   <td style={styles.gridTdName} className="grid-name-col">{s.roll}</td>
                                   <td style={{ ...styles.gridTdName, textAlign: "left" }} className="grid-name-col">
                                     <div>{s.name}</div>
+                                    {s.nameHi && <div style={{ fontSize: 9.5, color: "#8a8368", fontFamily: "'Noto Sans Devanagari', 'Inter', sans-serif" }}>{s.nameHi}</div>}
                                     {(s.lateCount > 0 || s.absentCount > 0) && (
                                       <div style={styles.gridNameSummary}>
                                         {s.lateCount > 0 && <span style={styles.gridNameSummaryLate}>L-{s.lateCount}</span>}
