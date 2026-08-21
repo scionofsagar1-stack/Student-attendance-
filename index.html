@@ -1663,10 +1663,11 @@ function AttendanceApp({ userEmail, onLogout, isGuest, isAdmin, canImport, clien
         status: st || null,
         time: stampedTime,
         late: stampedTime ? isLateStamp(stampedTime, getLateTimeForDate(lateTimeHistory, lateTime, dateStr)) : false,
+        holiday: holidays[dateStr] || null,
       });
     }
     return rows;
-  }, [selectedStudentId, selectedMonth, daysInSelectedMonth, attendance, attendanceTimes, lateTime, lateTimeHistory]); // eslint-disable-line
+  }, [selectedStudentId, selectedMonth, daysInSelectedMonth, attendance, attendanceTimes, lateTime, lateTimeHistory, holidays]); // eslint-disable-line
 
   const studentAbsentDates = useMemo(() => {
     if (!selectedStudentId) return [];
@@ -2851,7 +2852,9 @@ function AttendanceApp({ userEmail, onLogout, isGuest, isAdmin, canImport, clien
                                     )}
                                   </td>
                                   <td style={{ ...styles.td, textAlign: "left" }}>
-                                    {info ? (
+                                    {row.holiday ? (
+                                      <span style={{ color: "#8a5a1c", fontWeight: 700 }}>🎌 Holiday{teacherMode ? ` (${row.holiday})` : ""}</span>
+                                    ) : info ? (
                                       row.status === "P" && teacherMode && row.time ? (
                                         <span style={{ color: row.late ? "#C1503D" : STATUS.P.color, fontWeight: 700 }}>
                                           {row.late ? "Late" : "On time"}
