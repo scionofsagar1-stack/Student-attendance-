@@ -723,6 +723,20 @@ function AttendanceApp({ userEmail, onLogout, isGuest, isAdmin, canImport, clien
   const [view, setView] = useState("enrollment");
   const [reportScope, setReportScope] = useState("month");
   const [teacherMode, setTeacherMode] = useState((isGuest || viewingTeacherEmail) ? !!lockedTimeMode : false);
+  // The line above only sets the STARTING value, once, when this component
+  // first mounts. When an admin toggles a custodian's Time Mode ON/OFF from
+  // the account panel *while already viewing that same custodian* (so
+  // effectiveUserId/key never changes and the component never remounts),
+  // lockedTimeMode updates via props but teacherMode — being its own
+  // useState — never re-syncs to it, so the register keeps showing the OLD
+  // Normal/Time Mode state until something forces a remount (e.g. a full
+  // page reload). This effect keeps them in sync any time the locked value
+  // actually changes, without needing a reload. It intentionally does
+  // nothing when neither isGuest nor viewingTeacherEmail is set, so it never
+  // fights the admin's own free-toggle button for their own register.
+  useEffect(() => {
+    if (isGuest || viewingTeacherEmail) setTeacherMode(!!lockedTimeMode);
+  }, [isGuest, viewingTeacherEmail, lockedTimeMode]);
   const [lateTimeEditing, setLateTimeEditing] = useState(false);
   const [selfieTarget, setSelfieTarget] = useState(null);
   const [viewingSelfie, setViewingSelfie] = useState(null);
@@ -759,6 +773,28 @@ function AttendanceApp({ userEmail, onLogout, isGuest, isAdmin, canImport, clien
     const id = newId("chk-alert");
     setCheckinAlerts((prev) => [...prev, { id, text }]);
     setTimeout(() => setCheckinAlerts((prev) => prev.filter((a) => a.id !== id)), 7000);
+  };
+  // Guards against duplicate/stacked alerts. Realtime push, the 5s poll,
+  // window "focus", and tab "visibilitychange" can all legitimately fire
+  // close together (e.g. right when the admin switches back to this tab) —
+  // without this, the SAME check-in got reported once per trigger that
+  // happened to overlap. alertedRef remembers every (class, date, student)
+  // we've already alerted on today so a repeat detection is a no-op;
+  // pullingRef stops two pulls from running at once in the first place.
+  const alertedRef = useRef(new Set());
+  const pullingRef = useRef(false);
+  // When the admin/custodian changes a student's status by hand, remember
+  // it here for a few seconds. The cloud-pull merge below treats the server
+  // as the source of truth for "today" — normally correct for catching
+  // remote self-check-ins, but if it runs again *before* this tab's own
+  // change has finished saving to the server, it would read the still-old
+  // server value and silently stamp the local edit right back to what it
+  // was (e.g. an admin removing a "Present" mark would watch it reappear a
+  // few seconds later). This suppresses server-merge for that one student
+  // on that one date until the local save has had time to land.
+  const recentLocalEditsRef = useRef({}); // `${date}:${studentId}` -> expiry ms
+  const markRecentLocalEdit = (date, studentId) => {
+    recentLocalEditsRef.current[`${date}:${studentId}`] = Date.now() + 15000;
   };
   const pullTodayFromCloudRef = useRef(null);
 
@@ -839,12 +875,19 @@ function AttendanceApp({ userEmail, onLogout, isGuest, isAdmin, canImport, clien
     let retryTimer = null;
     const pullTodayFromCloud = async () => {
       if (document.visibilityState !== "visible") return;
+      if (pullingRef.current) return; // a pull is already in flight — don't overlap
       if (retryTimer) { clearTimeout(retryTimer); retryTimer = null; }
+      pullingRef.current = true;
       try {
         const res = await window.storage.get(STORAGE_KEY, false);
         if (!res || !res.value) return;
         const serverData = JSON.parse(res.value);
         if (!serverData.classes || !serverData.classes.length) return;
+        const now = Date.now();
+        const isSuppressed = (studentId) => {
+          const exp = recentLocalEditsRef.current[`${today}:${studentId}`];
+          return exp && exp > now;
+        };
         setClasses((prev) => prev.map((c) => {
           const sc = serverData.classes.find((x) => x.id === c.id);
           if (!sc) return c;
@@ -852,30 +895,49 @@ function AttendanceApp({ userEmail, onLogout, isGuest, isAdmin, canImport, clien
           const merged = { ...c };
           if (sc.attendance && sc.attendance[today]) {
             const localDay = (c.attendance && c.attendance[today]) || {};
-            const mergedDay = { ...localDay, ...sc.attendance[today] };
+            const serverDay = sc.attendance[today];
+            // Server wins for today EXCEPT for any student this tab edited
+            // in the last few seconds — that guards against a fast poll or
+            // realtime push landing between a local edit (e.g. an admin
+            // removing a "Present" mark) and that edit's own save
+            // finishing, which would otherwise read the still-old server
+            // value and silently put the mark right back.
+            const mergedDay = { ...localDay };
+            Object.keys(serverDay).forEach((studentId) => {
+              if (!isSuppressed(studentId)) mergedDay[studentId] = serverDay[studentId];
+            });
             if (JSON.stringify(mergedDay) !== JSON.stringify(localDay)) {
               merged.attendance = { ...c.attendance, [today]: mergedDay };
               changed = true;
-              // Anything that just flipped to "P" here came from a
-              // self-check-in the admin/custodian never actively did in
-              // this tab (the standalone app or the Fee Register's embedded
-              // check-in) — surface a visible alert so it can't quietly go
-              // unnoticed, which is exactly the "candidate knows, admin
-              // doesn't" gap.
-              Object.keys(sc.attendance[today]).forEach((studentId) => {
+              // Anything that just flipped to "P" here (and wasn't this
+              // tab's own suppressed edit) came from a self-check-in the
+              // admin/custodian never actively did in this tab (the
+              // standalone app or the Fee Register's embedded check-in) —
+              // surface a visible alert so it can't quietly go unnoticed.
+              // alertedRef stops the SAME event from re-alerting if this
+              // merge logic ever runs again for it (e.g. overlapping
+              // triggers), since we only want one toast per check-in.
+              Object.keys(serverDay).forEach((studentId) => {
+                if (isSuppressed(studentId)) return;
                 const wasPresentAlready = localDay[studentId] === "P";
-                const isPresentNow = sc.attendance[today][studentId] === "P";
-                if (isPresentNow && !wasPresentAlready) {
-                  const student = (c.students || []).find((s) => s.id === studentId);
-                  const timeStr = (sc.attendanceTimes && sc.attendanceTimes[today] && sc.attendanceTimes[today][studentId]) || "";
-                  pushCheckinAlert(`✅ ${student ? student.name : "A student"} just checked in${timeStr ? ` (${timeStr})` : ""}${c.className ? ` — ${c.className}` : ""}`);
-                }
+                const isPresentNow = serverDay[studentId] === "P";
+                if (!isPresentNow || wasPresentAlready) return;
+                const alertKey = `${c.id}:${today}:${studentId}`;
+                if (alertedRef.current.has(alertKey)) return;
+                alertedRef.current.add(alertKey);
+                const student = (c.students || []).find((s) => s.id === studentId);
+                const timeStr = (sc.attendanceTimes && sc.attendanceTimes[today] && sc.attendanceTimes[today][studentId]) || "";
+                pushCheckinAlert(`✅ ${student ? student.name : "A student"} just checked in${timeStr ? ` (${timeStr})` : ""}${c.className ? ` — ${c.className}` : ""}`);
               });
             }
           }
           if (sc.attendanceTimes && sc.attendanceTimes[today]) {
             const localDay = (c.attendanceTimes && c.attendanceTimes[today]) || {};
-            const mergedDay = { ...localDay, ...sc.attendanceTimes[today] };
+            const serverDay = sc.attendanceTimes[today];
+            const mergedDay = { ...localDay };
+            Object.keys(serverDay).forEach((studentId) => {
+              if (!isSuppressed(studentId)) mergedDay[studentId] = serverDay[studentId];
+            });
             if (JSON.stringify(mergedDay) !== JSON.stringify(localDay)) {
               merged.attendanceTimes = { ...c.attendanceTimes, [today]: mergedDay };
               changed = true;
@@ -883,7 +945,11 @@ function AttendanceApp({ userEmail, onLogout, isGuest, isAdmin, canImport, clien
           }
           if (sc.attendanceSelfies && sc.attendanceSelfies[today]) {
             const localDay = (c.attendanceSelfies && c.attendanceSelfies[today]) || {};
-            const mergedDay = { ...localDay, ...sc.attendanceSelfies[today] };
+            const serverDay = sc.attendanceSelfies[today];
+            const mergedDay = { ...localDay };
+            Object.keys(serverDay).forEach((studentId) => {
+              if (!isSuppressed(studentId)) mergedDay[studentId] = serverDay[studentId];
+            });
             if (JSON.stringify(mergedDay) !== JSON.stringify(localDay)) {
               merged.attendanceSelfies = { ...c.attendanceSelfies, [today]: mergedDay };
               changed = true;
@@ -899,6 +965,8 @@ function AttendanceApp({ userEmail, onLogout, isGuest, isAdmin, canImport, clien
         // invisible to the admin/custodian for longer than necessary.
         console.warn("pullTodayFromCloud failed, retrying shortly:", e);
         retryTimer = setTimeout(pullTodayFromCloud, 2000);
+      } finally {
+        pullingRef.current = false;
       }
     };
     pullTodayFromCloud();
@@ -1547,6 +1615,7 @@ function AttendanceApp({ userEmail, onLogout, isGuest, isAdmin, canImport, clien
   const markStatus = (studentId, status) => {
     const wasStatus = (attendance[selectedDate] || {})[studentId];
     const willBeSet = wasStatus !== status; // false = user is clearing this status
+    markRecentLocalEdit(selectedDate, studentId);
     setAttendance((prev) => {
       const day = { ...(prev[selectedDate] || {}) };
       day[studentId] = day[studentId] === status ? undefined : status;
@@ -1570,6 +1639,7 @@ function AttendanceApp({ userEmail, onLogout, isGuest, isAdmin, canImport, clien
 
   const markAllStatus = (status) => {
     if (!activeStudents.length) return;
+    activeStudents.forEach((s) => markRecentLocalEdit(selectedDate, s.id));
     setAttendance((prev) => {
       const day = { ...(prev[selectedDate] || {}) };
       activeStudents.forEach((s) => {
@@ -1583,6 +1653,7 @@ function AttendanceApp({ userEmail, onLogout, isGuest, isAdmin, canImport, clien
     if (!activeStudents.length) return;
     const day = attendance[selectedDate] || {};
     const allPresent = activeStudents.every((s) => day[s.id] === "P");
+    activeStudents.forEach((s) => markRecentLocalEdit(selectedDate, s.id));
     setAttendance((prev) => {
       const nextDay = { ...(prev[selectedDate] || {}) };
       activeStudents.forEach((s) => {
