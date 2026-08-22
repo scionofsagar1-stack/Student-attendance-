@@ -98,7 +98,7 @@
 </script>
 
 <script type="text/plain" id="app-source">
-const { useState, useEffect, useRef, useMemo } = React;
+const { useState, useEffect, useRef, useMemo, useCallback } = React;
 
 // Admin PIN for deleting a class (device-level). Admin can change this from the header.
 const DELETE_PIN_KEY = "attendance-app-delete-pin";
@@ -678,7 +678,7 @@ function PinPromptModal({ studentName, expectedPin, mode, isAdminPin, onSuccess,
   );
 }
 
-function AttendanceApp({ userEmail, onLogout, isGuest, isAdmin, canImport, client, signupClient, teacherOptions = [], viewAsUserId, onChangeViewAs, viewingTeacherEmail, lockedTimeMode }) {
+function AttendanceApp({ userEmail, onLogout, isGuest, isAdmin, canImport, client, signupClient, teacherOptions = [], viewAsUserId, onChangeViewAs, onTeacherAccountsChanged, viewingTeacherEmail, lockedTimeMode, storageUserId }) {
   const [loaded, setLoaded] = useState(false);
   const [classes, setClasses] = useState([]);
   const [activeClassId, setActiveClassId] = useState(null);
@@ -746,6 +746,21 @@ function AttendanceApp({ userEmail, onLogout, isGuest, isAdmin, canImport, clien
   const [saveError, setSaveError] = useState(false);
   const [justStamped, setJustStamped] = useState(null);
   const nameInputRef = useRef(null);
+
+  // ---- Live "someone just checked in" alert ----
+  // Candidates checking in from the standalone app / Fee Register never
+  // touch this tab directly — without an explicit, visible alert, an
+  // admin/custodian who isn't already staring at the Register tab has no
+  // way to know a check-in happened at all (the candidate sees a green
+  // "marked ✅" on their own screen, but nothing tells the admin). This
+  // banner + the realtime subscription below close that gap.
+  const [checkinAlerts, setCheckinAlerts] = useState([]); // [{id, text}]
+  const pushCheckinAlert = (text) => {
+    const id = newId("chk-alert");
+    setCheckinAlerts((prev) => [...prev, { id, text }]);
+    setTimeout(() => setCheckinAlerts((prev) => prev.filter((a) => a.id !== id)), 7000);
+  };
+  const pullTodayFromCloudRef = useRef(null);
 
   // ---- load + migrate ----
   useEffect(() => {
@@ -821,8 +836,10 @@ function AttendanceApp({ userEmail, onLogout, isGuest, isAdmin, canImport, clien
   useEffect(() => {
     if (!loaded) return;
     const today = todayISO();
+    let retryTimer = null;
     const pullTodayFromCloud = async () => {
       if (document.visibilityState !== "visible") return;
+      if (retryTimer) { clearTimeout(retryTimer); retryTimer = null; }
       try {
         const res = await window.storage.get(STORAGE_KEY, false);
         if (!res || !res.value) return;
@@ -839,6 +856,21 @@ function AttendanceApp({ userEmail, onLogout, isGuest, isAdmin, canImport, clien
             if (JSON.stringify(mergedDay) !== JSON.stringify(localDay)) {
               merged.attendance = { ...c.attendance, [today]: mergedDay };
               changed = true;
+              // Anything that just flipped to "P" here came from a
+              // self-check-in the admin/custodian never actively did in
+              // this tab (the standalone app or the Fee Register's embedded
+              // check-in) — surface a visible alert so it can't quietly go
+              // unnoticed, which is exactly the "candidate knows, admin
+              // doesn't" gap.
+              Object.keys(sc.attendance[today]).forEach((studentId) => {
+                const wasPresentAlready = localDay[studentId] === "P";
+                const isPresentNow = sc.attendance[today][studentId] === "P";
+                if (isPresentNow && !wasPresentAlready) {
+                  const student = (c.students || []).find((s) => s.id === studentId);
+                  const timeStr = (sc.attendanceTimes && sc.attendanceTimes[today] && sc.attendanceTimes[today][studentId]) || "";
+                  pushCheckinAlert(`✅ ${student ? student.name : "A student"} just checked in${timeStr ? ` (${timeStr})` : ""}${c.className ? ` — ${c.className}` : ""}`);
+                }
+              });
             }
           }
           if (sc.attendanceTimes && sc.attendanceTimes[today]) {
@@ -859,16 +891,64 @@ function AttendanceApp({ userEmail, onLogout, isGuest, isAdmin, canImport, clien
           }
           return changed ? merged : c;
         }));
-      } catch (e) { /* ignore — will retry on next tick */ }
+      } catch (e) {
+        // Don't just swallow this and silently wait for the next full
+        // interval tick (up to 5s away) — log it for debugging, and retry
+        // quickly once (2s) so a transient network hiccup self-heals almost
+        // immediately instead of leaving a candidate's self-check-in
+        // invisible to the admin/custodian for longer than necessary.
+        console.warn("pullTodayFromCloud failed, retrying shortly:", e);
+        retryTimer = setTimeout(pullTodayFromCloud, 2000);
+      }
     };
     pullTodayFromCloud();
-    const interval = setInterval(pullTodayFromCloud, 12000);
+    // 5s instead of 12s: a candidate self-checking-in from the standalone
+    // app / Fee Register writes straight to the server (see note above),
+    // bypassing this tab's React state entirely — this interval is a
+    // fallback safety net for whenever the realtime subscription below
+    // misses/reconnects; it should rarely be the thing that actually
+    // delivers a check-in now.
+    const interval = setInterval(pullTodayFromCloud, 5000);
     document.addEventListener("visibilitychange", pullTodayFromCloud);
+    window.addEventListener("focus", pullTodayFromCloud);
+    pullTodayFromCloudRef.current = pullTodayFromCloud;
     return () => {
       clearInterval(interval);
+      if (retryTimer) clearTimeout(retryTimer);
       document.removeEventListener("visibilitychange", pullTodayFromCloud);
+      window.removeEventListener("focus", pullTodayFromCloud);
     };
-  }, [loaded]);
+  }, [loaded, view]);
+
+  // ---- Realtime push: catch a self-check-in the instant it happens ----
+  // The polling above is only a safety net now. self_checkin_by_pin (called
+  // from this app's own Candidate login AND from the separate standalone
+  // Fee Register app) writes straight into this row of `app_storage` on the
+  // server. Supabase Realtime lets us subscribe to UPDATEs on that exact
+  // row and react within a second or two, instead of waiting for the next
+  // poll tick — and it fires even if the admin is on a completely different
+  // tab/screen in the app, not just the Register view, closing the "student
+  // knows, admin has no idea" gap.
+  //
+  // NOTE: this requires the `app_storage` table to have Realtime enabled in
+  // the Supabase dashboard (Database → Replication). If it isn't enabled,
+  // this subscription simply never fires and the 5s poll above still covers
+  // things — it just won't be instant.
+  useEffect(() => {
+    if (!loaded || !client || !storageUserId) return;
+    const channel = client
+      .channel(`app_storage_${storageUserId}`)
+      .on(
+        "postgres_changes",
+        { event: "UPDATE", schema: "public", table: "app_storage", filter: `user_id=eq.${storageUserId}` },
+        (payload) => {
+          if (payload?.new?.key && payload.new.key !== STORAGE_KEY) return;
+          if (pullTodayFromCloudRef.current) pullTodayFromCloudRef.current();
+        }
+      )
+      .subscribe();
+    return () => { client.removeChannel(channel); };
+  }, [loaded, client, storageUserId]);
 
   // ---- Import-source table name (the Supabase table another app, like the
   // fee register, writes candidate data into) — remembered per-user via the
@@ -1061,6 +1141,10 @@ function AttendanceApp({ userEmail, onLogout, isGuest, isAdmin, canImport, clien
     const { data, error } = await client
       .from("profiles").select("*").eq("role", "teacher").order("created_at", { ascending: false });
     if (!error && data) setTeacherAccounts(data);
+    // Keep the admin's top-level "View as" list (and each custodian's Time
+    // Mode derived from it) in sync too — otherwise a Time Mode toggle made
+    // here only shows up for "View as" after a full page reload.
+    if (onTeacherAccountsChanged) onTeacherAccountsChanged();
   };
 
   const createTeacherAccount = async () => {
@@ -1679,6 +1763,20 @@ function AttendanceApp({ userEmail, onLogout, isGuest, isAdmin, canImport, clien
 
   return (
     <div style={styles.outer}>
+      {checkinAlerts.length > 0 && (
+        <div style={styles.checkinAlertStack} className="no-print">
+          {checkinAlerts.map((a) => (
+            <div key={a.id} style={styles.checkinAlertToast}>
+              {a.text}
+              <button
+                style={styles.checkinAlertClose}
+                onClick={() => setCheckinAlerts((prev) => prev.filter((x) => x.id !== a.id))}
+                aria-label="Dismiss"
+              >×</button>
+            </div>
+          ))}
+        </div>
+      )}
       <style>{FONT_IMPORT}{`
         * { box-sizing: border-box; }
         .stamp-pop { animation: stampIn 0.38s cubic-bezier(.34,1.56,.64,1); }
@@ -3060,6 +3158,9 @@ function AttendanceApp({ userEmail, onLogout, isGuest, isAdmin, canImport, clien
 
 const styles = {
   outer: { minHeight: "100vh", background: "#e9e3ce", display: "flex", flexDirection: "column", alignItems: "center", padding: "20px 12px", fontFamily: "'Inter', sans-serif" },
+  checkinAlertStack: { position: "fixed", top: 10, left: 0, right: 0, zIndex: 9999, display: "flex", flexDirection: "column", alignItems: "center", gap: 6, padding: "0 10px", pointerEvents: "none" },
+  checkinAlertToast: { pointerEvents: "auto", width: "100%", maxWidth: 460, background: "#2f5c3c", color: "#fdfaf0", fontFamily: "'Inter', sans-serif", fontWeight: 600, fontSize: 12.5, padding: "10px 34px 10px 14px", borderRadius: 10, boxShadow: "0 8px 20px rgba(0,0,0,0.22)", position: "relative" },
+  checkinAlertClose: { position: "absolute", top: 6, right: 8, background: "transparent", border: "none", color: "#fdfaf0", fontSize: 16, fontWeight: 700, cursor: "pointer", lineHeight: 1, padding: 4 },
   accountBar: { width: "100%", maxWidth: 480, display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 10, padding: "0 4px" },
   accountEmail: { fontSize: 11.5, color: "#6B4226", fontFamily: "'IBM Plex Mono', monospace", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", maxWidth: "70%" },
   guestTag: { marginLeft: 6, background: "#E8C468", color: "#6B4226", fontFamily: "'Inter', sans-serif", fontWeight: 700, fontSize: 9, padding: "2px 5px", borderRadius: 4, verticalAlign: "middle" },
@@ -3657,8 +3758,27 @@ function Root() {
   }, [client, session, profile]);
 
   // List of teacher accounts for Admin — used for the "which teacher's data
-  // to view/edit" dropdown. Actual access is governed by RLS (is_admin()),
-  // this list is just for display in the UI.
+  // to view/edit" dropdown, AND to work out that teacher's Time Mode
+  // (lockedTimeMode below). Actual data access is governed by RLS
+  // (is_admin()), this list is just for display/derived UI state.
+  //
+  // refreshTeacherOptions is pulled out as its own function (instead of only
+  // living inside a useEffect) so it can also be called right after the
+  // admin flips a custodian's Time Mode / Can Import toggle, or deletes /
+  // creates one, inside the panel further down the tree. Without this, this
+  // list stays exactly as it was when the admin first logged in — so if the
+  // admin turns Time Mode ON for a custodian and then immediately opens
+  // "View as" that custodian, lockedTimeMode below still reflects the OLD
+  // value (list was never re-fetched) and the register shows Normal instead
+  // of Time Mode, until a full page reload re-fetches this list from
+  // scratch. Refreshing right after every change — and again whenever the
+  // admin switches who they're viewing — fixes that without needing a reload.
+  const refreshTeacherOptions = useCallback(async () => {
+    if (!client || !profile || profile.role !== "admin") return;
+    const { data } = await client.from("profiles").select("*").eq("role", "teacher").order("created_at", { ascending: false });
+    if (data) setTeacherOptions(data);
+  }, [client, profile]);
+
   useEffect(() => {
     if (!client || !profile || profile.role !== "admin") {
       setTeacherOptions([]);
@@ -3670,6 +3790,13 @@ function Root() {
     });
     return () => { cancelled = true; };
   }, [client, profile]);
+
+  // Re-check the list the moment the admin switches "View as" to a
+  // different custodian — guarantees the Time Mode shown is always the
+  // current one from the server, not whatever was cached on login.
+  useEffect(() => {
+    if (viewAsUserId) refreshTeacherOptions();
+  }, [viewAsUserId, refreshTeacherOptions]);
 
   const handleLogout = async () => {
     if (client) await client.auth.signOut();
@@ -3737,8 +3864,10 @@ function Root() {
       teacherOptions={teacherOptions}
       viewAsUserId={viewAsUserId}
       onChangeViewAs={setViewAsUserId}
+      onTeacherAccountsChanged={refreshTeacherOptions}
       viewingTeacherEmail={viewingTeacher ? viewingTeacher.email : null}
       lockedTimeMode={lockedTimeMode}
+      storageUserId={effectiveUserId}
     />
   );
 }
