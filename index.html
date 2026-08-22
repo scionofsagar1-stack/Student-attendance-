@@ -47,6 +47,151 @@
 <div id="root"></div>
 <div id="boot-error"></div>
 
+<!-- ============================================================
+     VIEW-ONLY Hindi translate toggle.
+     - Purely a display layer: translates whatever text is currently
+       on screen using Google's public translate endpoint, live.
+     - Nothing here is written to Supabase, localStorage, or any
+       other storage — it only edits text nodes in the DOM. Refreshing
+       the page (or navigating) resets it back to English.
+     - Completely separate from the app's own save/sync system.
+     ============================================================ -->
+<button id="viewTranslateToggleBtn" type="button" title="Hindi mein dekhein (sirf dikhane ke liye, kahin save nahi hota)"
+  style="position:fixed;bottom:18px;right:18px;z-index:99999;background:#1F3D2B;color:#F5F3E7;border:none;border-radius:24px;padding:11px 16px;font-family:'Inter',sans-serif;font-weight:700;font-size:13px;cursor:pointer;box-shadow:0 4px 14px rgba(0,0,0,0.28);">
+  🌐 हिंदी में देखें
+</button>
+
+<script>
+(function () {
+  var isHindi = false;
+  var textOrig = new WeakMap();   // text node -> original text
+  var attrOrig = new WeakMap();   // element node -> { attrName: originalValue }
+  var cache = new Map();          // english string -> hindi string (in-memory only, cleared on reload)
+  var pendingPromises = new Map();
+  var observer = null;
+  var muted = false;
+  var ATTRS = ["placeholder", "title", "aria-label"];
+  var SKIP_TAGS = { SCRIPT: 1, STYLE: 1, NOSCRIPT: 1 };
+
+  function hasLetters(s) { return typeof s === "string" && /[A-Za-z]/.test(s); }
+
+  function fetchTranslation(text) {
+    if (cache.has(text)) return Promise.resolve(cache.get(text));
+    if (pendingPromises.has(text)) return pendingPromises.get(text);
+    var p = fetch("https://translate.googleapis.com/translate_a/single?client=gtx&sl=en&tl=hi&dt=t&q=" + encodeURIComponent(text))
+      .then(function (res) {
+        if (!res.ok) throw new Error("translate http " + res.status);
+        return res.json();
+      })
+      .then(function (data) {
+        var out = ((data && data[0]) || []).map(function (part) { return part[0]; }).join("");
+        var result = out || text;
+        cache.set(text, result);
+        return result;
+      })
+      .catch(function () {
+        cache.set(text, text);
+        return text;
+      })
+      .finally(function () {
+        pendingPromises.delete(text);
+      });
+    pendingPromises.set(text, p);
+    return p;
+  }
+
+  function applyCachedOrQueue(orig, setter) {
+    if (!hasLetters(orig) || !orig.trim()) return;
+    if (cache.has(orig)) {
+      var t = cache.get(orig);
+      if (t !== orig) setter(t);
+      return;
+    }
+    fetchTranslation(orig).then(function (t) {
+      if (!isHindi) return;
+      if (t && t !== orig) setter(t);
+    });
+  }
+
+  function walk(node) {
+    if (!node) return;
+    if (node.nodeType === 3) {
+      var orig = textOrig.get(node);
+      if (orig === undefined) { orig = node.nodeValue; textOrig.set(node, orig); }
+      if (isHindi) {
+        applyCachedOrQueue(orig, function (t) { if (node.nodeValue !== t) node.nodeValue = t; });
+      } else if (node.nodeValue !== orig) {
+        node.nodeValue = orig;
+      }
+      return;
+    }
+    if (node.nodeType !== 1) return;
+    if (SKIP_TAGS[node.tagName] || node.id === "viewTranslateToggleBtn") return;
+
+    for (var i = 0; i < ATTRS.length; i++) {
+      var attr = ATTRS[i];
+      if (node.hasAttribute && node.hasAttribute(attr)) {
+        var store = attrOrig.get(node);
+        if (!store) { store = {}; attrOrig.set(node, store); }
+        if (store[attr] === undefined) store[attr] = node.getAttribute(attr);
+        var origVal = store[attr];
+        (function (node, attr, origVal) {
+          if (isHindi) {
+            applyCachedOrQueue(origVal, function (t) { if (node.getAttribute(attr) !== t) node.setAttribute(attr, t); });
+          } else if (node.getAttribute(attr) !== origVal) {
+            node.setAttribute(attr, origVal);
+          }
+        })(node, attr, origVal);
+      }
+    }
+
+    var kids = node.childNodes;
+    for (var j = 0; j < kids.length; j++) walk(kids[j]);
+  }
+
+  function applyAll() {
+    muted = true;
+    var root = document.getElementById("root");
+    if (root) walk(root);
+    muted = false;
+  }
+
+  function startObserver() {
+    if (observer) return;
+    observer = new MutationObserver(function (mutations) {
+      if (muted || !isHindi) return;
+      muted = true;
+      for (var i = 0; i < mutations.length; i++) {
+        var m = mutations[i];
+        if (m.type === "characterData") walk(m.target);
+        else if (m.type === "childList") m.addedNodes.forEach(function (n) { walk(n); });
+        else if (m.type === "attributes" && m.target) walk(m.target);
+      }
+      muted = false;
+    });
+    var root = document.getElementById("root");
+    if (root) {
+      observer.observe(root, {
+        childList: true, subtree: true, characterData: true,
+        attributes: true, attributeFilter: ATTRS,
+      });
+    }
+  }
+
+  function updateBtnLabel() {
+    var btn = document.getElementById("viewTranslateToggleBtn");
+    if (btn) btn.textContent = isHindi ? "🌐 View in English" : "🌐 हिंदी में देखें";
+  }
+
+  document.getElementById("viewTranslateToggleBtn").addEventListener("click", function () {
+    isHindi = !isHindi;
+    updateBtnLabel();
+    applyAll();
+    if (isHindi) startObserver();
+  });
+})();
+</script>
+
 <script>
   // ---- surface any error on-screen instead of a silent blank page ----
   window.addEventListener("error", function (e) {
@@ -678,7 +823,7 @@ function PinPromptModal({ studentName, expectedPin, mode, isAdminPin, onSuccess,
   );
 }
 
-function AttendanceApp({ userEmail, onLogout, isGuest, isAdmin, canImport, client, signupClient, teacherOptions = [], viewAsUserId, onChangeViewAs, onTeacherAccountsChanged, viewingTeacherEmail, lockedTimeMode, storageUserId }) {
+function AttendanceApp({ userEmail, onLogout, isGuest, isAdmin, canImport, client, signupClient, teacherOptions = [], viewAsUserId, onChangeViewAs, onTeacherAccountsChanged, viewingTeacherEmail, lockedTimeMode, storageUserId, onOpenCandidateLogin }) {
   const [loaded, setLoaded] = useState(false);
   const [classes, setClasses] = useState([]);
   const [activeClassId, setActiveClassId] = useState(null);
@@ -1903,6 +2048,11 @@ function AttendanceApp({ userEmail, onLogout, isGuest, isAdmin, canImport, clien
             {isAdmin && (
               <button style={styles.teacherPanelBtn} onClick={() => setShowTeacherPanel((v) => !v)}>
                 Entities Custodian Logins
+              </button>
+            )}
+            {onOpenCandidateLogin && (
+              <button style={styles.teacherPanelBtn} onClick={onOpenCandidateLogin}>
+                🎓 Candidate
               </button>
             )}
             <button style={styles.logoutBtn} onClick={onLogout}>Logout</button>
@@ -3671,6 +3821,60 @@ function CandidateSelfScreen({ client, candidate, onLogout }) {
   );
 }
 
+// Lets an already-logged-in Admin/Custodian open the candidate self-check-in
+// flow without logging out first. Reuses the same find_checkin_student RPC
+// as the Candidate tab on the login screen; on success it hands control to
+// CandidateSelfScreen exactly like a fresh candidate login would, and
+// closing/logging out of that screen returns straight to this same session
+// (nothing about the staff session is touched here).
+function CandidateLoginModal({ client, onClose, onCandidateLoggedIn }) {
+  const [cName, setCName] = useState("");
+  const [cPin, setCPin] = useState("");
+  const [cErr, setCErr] = useState("");
+  const [cLoading, setCLoading] = useState(false);
+
+  const submitCandidate = async () => {
+    setCErr("");
+    if (!cName.trim() || cPin.length !== 4) return;
+    setCLoading(true);
+    try {
+      const { data, error } = await client.rpc("find_checkin_student", { p_name: cName.trim(), p_pin: cPin, p_date: todayISO() });
+      if (error) {
+        setCErr("Something went wrong — try again.");
+      } else if (!data || data.found === false) {
+        setCErr((data && data.message) || "Name or PIN did not match.");
+      } else {
+        onCandidateLoggedIn({ name: cName.trim(), pin: cPin, classInfo: data });
+      }
+    } catch (e) {
+      setCErr("Something went wrong: " + (e && e.message ? e.message : e));
+    } finally {
+      setCLoading(false);
+    }
+  };
+
+  return (
+    <div style={{ position: "fixed", inset: 0, background: "rgba(31,26,20,0.55)", zIndex: 6000, display: "flex", alignItems: "center", justifyContent: "center", padding: "20px 14px" }} className="no-print">
+      <div style={authStyles.card}>
+        <div style={authStyles.title}>🎓 Candidate Check-in</div>
+        <div style={authStyles.subtitle}>Enter your name and 4-digit PIN</div>
+        <input style={authStyles.input} placeholder="Your full name" value={cName} onChange={(e) => setCName(e.target.value)}
+          onKeyDown={(e) => e.key === "Enter" && cPin.length === 4 && submitCandidate()} autoFocus />
+        <input style={{ ...authStyles.input, textAlign: "center", letterSpacing: 8 }} type="password" inputMode="numeric" maxLength={4}
+          placeholder="PIN" value={cPin} onChange={(e) => setCPin(e.target.value.replace(/\D/g, "").slice(0, 4))}
+          onKeyDown={(e) => e.key === "Enter" && submitCandidate()} />
+
+        {cErr && <div style={authStyles.error}>{cErr}</div>}
+
+        <button style={authStyles.primaryBtn} onClick={submitCandidate} disabled={cLoading || !cName.trim() || cPin.length !== 4}>
+          {cLoading ? "Please wait…" : "Login"}
+        </button>
+        <a href="#" onClick={(e) => { e.preventDefault(); onClose(); }} style={authStyles.checkinLink}>← Cancel</a>
+      </div>
+    </div>
+  );
+}
+
 class ErrorBoundary extends React.Component {
   constructor(props) {
     super(props);
@@ -3713,6 +3917,7 @@ function Root() {
   const [teacherOptions, setTeacherOptions] = useState([]);
   const [viewAsUserId, setViewAsUserId] = useState(""); // "" = apna data, otherwise a teacher's user id
   const [candidate, setCandidate] = useState(null); // { name, pin, classInfo } once candidate-logged-in
+  const [showCandidateLoginModal, setShowCandidateLoginModal] = useState(false); // Admin/Custodian opened Candidate check-in without logging out
 
   useEffect(() => {
     if (EMBEDDED_SUPABASE_URL && EMBEDDED_SUPABASE_ANON_KEY) {
@@ -3923,23 +4128,33 @@ function Root() {
   const canImport = isAdmin || (isTeacher && !!profile.can_import);
 
   return (
-    <AttendanceApp
-      key={effectiveUserId}
-      userEmail={userLabel}
-      isGuest={isTeacher}
-      isAdmin={isAdmin}
-      canImport={canImport}
-      client={client}
-      signupClient={signupClient}
-      onLogout={handleLogout}
-      teacherOptions={teacherOptions}
-      viewAsUserId={viewAsUserId}
-      onChangeViewAs={setViewAsUserId}
-      onTeacherAccountsChanged={refreshTeacherOptions}
-      viewingTeacherEmail={viewingTeacher ? viewingTeacher.email : null}
-      lockedTimeMode={lockedTimeMode}
-      storageUserId={effectiveUserId}
-    />
+    <>
+      <AttendanceApp
+        key={effectiveUserId}
+        userEmail={userLabel}
+        isGuest={isTeacher}
+        isAdmin={isAdmin}
+        canImport={canImport}
+        client={client}
+        signupClient={signupClient}
+        onLogout={handleLogout}
+        teacherOptions={teacherOptions}
+        viewAsUserId={viewAsUserId}
+        onChangeViewAs={setViewAsUserId}
+        onTeacherAccountsChanged={refreshTeacherOptions}
+        viewingTeacherEmail={viewingTeacher ? viewingTeacher.email : null}
+        lockedTimeMode={lockedTimeMode}
+        storageUserId={effectiveUserId}
+        onOpenCandidateLogin={() => setShowCandidateLoginModal(true)}
+      />
+      {showCandidateLoginModal && (
+        <CandidateLoginModal
+          client={client}
+          onClose={() => setShowCandidateLoginModal(false)}
+          onCandidateLoggedIn={(c) => { setShowCandidateLoginModal(false); setCandidate(c); }}
+        />
+      )}
+    </>
   );
 }
 
